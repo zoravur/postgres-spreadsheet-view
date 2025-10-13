@@ -73,7 +73,6 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 }
 
 // ----------------- SELECT analysis (top-level rendering) -----------------
-
 func (c *ctx) analyzeSelect(selectStmt map[string]any) (map[string][]string, error) {
 	out := make(map[string][]string)
 
@@ -107,6 +106,25 @@ func (c *ctx) analyzeSelect(selectStmt map[string]any) (map[string][]string, err
 			if outKey == "" {
 				outKey = strings.Join(parts, ".")
 			}
+
+			// NEW: if it's alias.col and derived provenance exists, propagate all sources
+			if len(parts) == 2 {
+				alias, col := parts[0], parts[1]
+				// prefer dp by alias (subselect alias)
+				if srcs, ok := c.dp[alias][col]; ok && len(srcs) > 0 {
+					out[outKey] = append(out[outKey], uniqueStrings(srcs)...)
+					continue
+				}
+				// …then dp by underlying table/name (CTE name)
+				if tbl, ok := c.scope[alias]; ok {
+					if srcs, ok := c.dp[tbl][col]; ok && len(srcs) > 0 {
+						out[outKey] = append(out[outKey], uniqueStrings(srcs)...)
+						continue
+					}
+				}
+			}
+
+			// fallback to single-source resolution (base tables etc.)
 			src, err := c.resolveColumn(parts)
 			if err != nil {
 				return nil, err
@@ -122,6 +140,11 @@ func (c *ctx) analyzeSelect(selectStmt map[string]any) (map[string][]string, err
 			}
 			out[outKey] = append(out[outKey], uniqueStrings(sources)...)
 		}
+	}
+
+	// Final pass: dedupe provenance per output key (handles mixes like f.title + f.*).
+	for k, v := range out {
+		out[k] = uniqueStrings(v)
 	}
 
 	return out, nil
