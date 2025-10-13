@@ -3,106 +3,78 @@
     "id": "1A",
     "query": "SELECT id, name FROM actor;",
     "expected": {
-      "id": [
-        "actor.id"
-      ],
-      "name": [
-        "actor.name"
-      ]
+      "id": ["actor.id"],
+      "name": ["actor.name"]
     }
   },
   {
     "id": "1B",
     "query": "SELECT a.id, a.name FROM actor AS a;",
     "expected": {
-      "a.id": [
-        "actor.id"
-      ],
-      "a.name": [
-        "actor.name"
-      ]
+      "a.id": ["actor.id"],
+      "a.name": ["actor.name"]
     }
   },
   {
     "id": "1C",
     "query": "SELECT * FROM actor;",
     "expected": {
-      "*": [
-        "actor.*"
-      ]
+      "id": ["actor.id"],
+      "name": ["actor.name"],
+      "first_name": ["actor.first_name"],
+      "last_name": ["actor.last_name"]
     }
   },
   {
     "id": "2A",
     "query": "SELECT a.first_name, f.title FROM actor a JOIN film f ON a.id = f.actor_id;",
     "expected": {
-      "a.first_name": [
-        "actor.first_name"
-      ],
-      "f.title": [
-        "film.title"
-      ]
+      "a.first_name": ["actor.first_name"],
+      "f.title": ["film.title"]
     }
   },
   {
     "id": "2B",
     "query": "SELECT first_name, title FROM actor a JOIN film f ON a.id = f.actor_id;",
     "expected": {
-      "first_name": [
-        "actor.first_name"
-      ],
-      "title": [
-        "film.title"
-      ]
+      "first_name": ["actor.first_name"],
+      "title": ["film.title"]
     }
   },
   {
     "id": "3A",
     "query": "SELECT first_name AS fname FROM actor;",
     "expected": {
-      "fname": [
-        "actor.first_name"
-      ]
+      "fname": ["actor.first_name"]
     }
   },
   {
     "id": "3C",
     "query": "SELECT a.first_name || ' ' || a.last_name AS fullname FROM actor a;",
     "expected": {
-      "fullname": [
-        "actor.first_name",
-        "actor.last_name"
-      ]
+      "fullname": ["actor.first_name", "actor.last_name"]
     }
   },
   {
     "id": "4A",
     "query": "SELECT * FROM (SELECT id, name FROM actor) AS sub;",
     "expected": {
-      "sub.id": [
-        "actor.id"
-      ],
-      "sub.name": [
-        "actor.name"
-      ]
+      "sub.id": ["actor.id"],
+      "sub.name": ["actor.name"]
     }
   },
   {
     "id": "4B",
     "query": "SELECT id FROM (SELECT id FROM actor) AS sub;",
     "expected": {
-      "id": [
-        "actor.id"
-      ]
+      "id": ["actor.id"]
     }
   },
   {
     "id": "5A",
     "query": "SELECT p.id FROM public.actor p;",
     "expected": {
-      "p.id": [
-        "public.actor.id"
-      ]
+      "p.id": ["public.actor.id"]
     }
   },
   {
@@ -119,66 +91,52 @@
     "id": "7C",
     "query": "SELECT a.id, SUM(f.revenue) FROM actor a JOIN film f ON a.id = f.actor_id GROUP BY a.id;",
     "expected": {
-      "a.id": [
-        "actor.id"
-      ],
-      "SUM(f.revenue)": [
-        "film.revenue"
-      ]
+      "a.id": ["actor.id"],
+      "SUM(f.revenue)": ["film.revenue"]
     }
   },
   {
     "id": "8A",
     "query": "WITH sub AS (SELECT id, name FROM actor) SELECT * FROM sub;",
     "expected": {
-      "sub.id": [
-        "actor.id"
-      ],
-      "sub.name": [
-        "actor.name"
-      ]
+      "sub.id": ["actor.id"],
+      "sub.name": ["actor.name"]
     }
   },
   {
     "id": "9A",
     "query": "SELECT a.*, f.title FROM actor a JOIN film f ON a.id = f.actor_id;",
     "expected": {
-      "a.*": [
-        "actor.*"
-      ],
-      "f.title": [
-        "film.title"
-      ]
+      "a.id": ["actor.id"],
+      "a.first_name": ["actor.first_name"],
+      "a.last_name": ["actor.last_name"],
+      "a.name": ["actor.name"],
+      "f.title": ["film.title"]
     }
   },
   {
     "id": "10A",
     "query": "SELECT a.id FROM actor a, film AS actor;",
     "expected": {
-      "a.id": [
-        "actor.id"
-      ]
+      "a.id": ["actor.id"]
     }
   },
   {
     "id": "11A",
     "query": "SELECT LENGTH(a.name) FROM actor a;",
     "expected": {
-      "LENGTH(a.name)": [
-        "actor.name"
-      ]
+      "LENGTH(a.name)": ["actor.name"]
     }
   },
   {
     "id": "12A",
     "query": "SELECT a.*, b.id FROM actor a, film b;",
     "expected": {
-      "a.*": [
-        "actor.*"
-      ],
-      "b.id": [
-        "film.id"
-      ]
+      "a.id": ["actor.id"],
+      "a.first_name": ["actor.first_name"],
+      "a.last_name": ["actor.last_name"],
+      "a.name": ["actor.name"],
+      "b.id": ["film.id"]
     }
   }
 ]
