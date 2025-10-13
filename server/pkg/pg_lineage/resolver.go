@@ -384,29 +384,40 @@ func handleStar(
 }
 
 // ----------------- RESOLUTION -----------------
-
 func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) (string, error) {
 	switch len(parts) {
 	case 1: // unqualified
 		col := parts[0]
-		// If single scope and it is a derived alias, use derived prov/map to map col
+
+		// If exactly one FROM item and it's derived, pull from derived provenance first.
 		if len(scope) == 1 {
 			for alias, tbl := range scope {
-				if alias == tbl || tbl == alias {
-					if dpm, ok := dp[alias]; ok {
-						if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
-							return srcs[0], nil
-						}
+				// alias == tbl for subselects; CTEs are keyed by CTE name (tbl) in dp/dc/der.
+				// We treat either "alias" or "tbl" being present in dp as "derived".
+				if dpm, ok := dp[alias]; ok {
+					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+						return srcs[0], nil
 					}
-					if dsm, ok := der[alias]; ok {
-						if src, ok := dsm[col]; ok {
-							return src, nil
-						}
+				}
+				if dpm, ok := dp[tbl]; ok {
+					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+						return srcs[0], nil
+					}
+				}
+				if dsm, ok := der[alias]; ok {
+					if src, ok := dsm[col]; ok {
+						return src, nil
+					}
+				}
+				if dsm, ok := der[tbl]; ok {
+					if src, ok := dsm[col]; ok {
+						return src, nil
 					}
 				}
 			}
 		}
-		// Otherwise, try to resolve uniquely using catalog
+
+		// Otherwise, unique-across-scope resolution via catalog.
 		candidates := []string{}
 		for _, tbl := range scope {
 			if hasColumn(cat, tbl, col) {
@@ -416,7 +427,7 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 		if len(candidates) == 1 {
 			return candidates[0] + "." + col, nil
 		}
-		if len(scope) == 1 { // single table in scope, fall back
+		if len(scope) == 1 {
 			for _, tbl := range scope {
 				return tbl + "." + col, nil
 			}
@@ -424,25 +435,37 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 		return "", fmt.Errorf("ambiguous column %s", col)
 
 	case 2: // alias.column ONLY (schema.table.column requires 3+ parts)
-		left := parts[0]
+		alias := parts[0]
 		col := parts[1]
-		// alias?
-		if tbl, ok := scope[left]; ok {
-			// Prefer new dp; then legacy der; then base
-			if dpm, ok := dp[left]; ok {
+
+		// Alias?
+		if tbl, ok := scope[alias]; ok {
+			// Prefer derived provenance, then legacy derived, else base.
+			if dpm, ok := dp[alias]; ok {
 				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 					return srcs[0], nil
 				}
 			}
-			if dsm, ok := der[left]; ok {
+			if dpm, ok := dp[tbl]; ok {
+				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+					return srcs[0], nil
+				}
+			}
+			if dsm, ok := der[alias]; ok {
+				if src, ok := dsm[col]; ok {
+					return src, nil
+				}
+			}
+			if dsm, ok := der[tbl]; ok {
 				if src, ok := dsm[col]; ok {
 					return src, nil
 				}
 			}
 			return tbl + "." + col, nil
 		}
+
 		// Not an alias -> error (don’t reinterpret as schema.table)
-		return "", fmt.Errorf("alias %s not found", left)
+		return "", fmt.Errorf("alias %s not found", alias)
 	}
 
 	// schema.table.column or catalog.schema.table.column
@@ -667,14 +690,15 @@ func keysSorted(m map[string]string) []string {
 }
 
 func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) {
-	wc, ok := selectStmt["withClause"].(map[string]any)
+	fmt.Printf("deriveCTEs: %v", selectStmt)
+	with, ok := selectStmt["withClause"].(map[string]any)
 	if !ok {
 		return
 	}
-	with, ok := wc["WithClause"].(map[string]any)
-	if !ok {
-		return
-	}
+	// with, ok := wc["WithClause"].(map[string]any)
+	// if !ok {
+	// 	return
+	// }
 	ctes, ok := with["ctes"].([]any)
 	if !ok {
 		return
