@@ -69,13 +69,18 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		val, _ := resTarget["val"].(map[string]any)
 
 		// --- Bare "*" at top-level (e.g., SELECT * FROM ...;)
-		if _, ok := val["A_Star"]; ok {
-			expandBareStar(out, scope, dc, dp, cat)
-			continue
-		}
+		// if _, ok := val["A_Star"]; ok {
+		// 	expandBareStar(out, scope, dc, dp, cat)
+		// 	continue
+		// }
 
 		// ColumnRef or alias.* under ColumnRef
 		if colref, ok := val["ColumnRef"].(map[string]any); ok {
+			// NEW: handle bare "*" encoded as ColumnRef with A_Star
+			if isStar(colref) && len(extractFields(colref)) == 0 {
+				expandBareStar(out, scope, dc, dp, cat)
+				continue
+			}
 			if handleStar(out, colref, scope, der, dc, dp, cat) {
 				continue
 			}
@@ -322,53 +327,60 @@ func expandBareStar(out map[string][]string, scope map[string]string, dc derived
 	}
 }
 
-func handleStar(out map[string][]string, colref map[string]any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) bool {
+func handleStar(
+	out map[string][]string,
+	colref map[string]any,
+	scope map[string]string,
+	der derivedSchemas,
+	dc derivedCols,
+	dp derivedProv,
+	cat Catalog,
+) bool {
 	if !isStar(colref) {
 		return false
 	}
 	parts := extractFields(colref)
 
-	// alias.* ?
-	if len(parts) == 1 {
-		alias := parts[0]
-		// Derived alias?
-		if cols := dc[alias]; len(cols) > 0 {
+	// Only alias.* here; bare * is handled by the caller
+	if len(parts) != 1 {
+		return false
+	}
+
+	alias := parts[0]
+
+	// Derived alias?
+	if cols := dc[alias]; len(cols) > 0 {
+		for _, c := range cols {
+			srcs := dp[alias][c]
+			if len(srcs) == 0 {
+				continue
+			}
+			key := alias + "." + c
+			out[key] = append(out[key], srcs...)
+		}
+		return true
+	}
+
+	// Base alias?
+	if tbl, ok := scope[alias]; ok {
+		if cols, ok := cat.Columns(tbl); ok {
 			for _, c := range cols {
-				srcs := dp[alias][c]
-				if len(srcs) == 0 {
-					continue
-				}
 				key := alias + "." + c
-				out[key] = append(out[key], srcs...)
+				out[key] = append(out[key], tbl+"."+c)
 			}
 			return true
 		}
-		// Base alias?
-		if tbl, ok := scope[alias]; ok {
-			if cols, ok := cat.Columns(tbl); ok {
+		if i := strings.IndexByte(tbl, '.'); i >= 0 {
+			if cols, ok := cat.Columns(tbl[i+1:]); ok {
 				for _, c := range cols {
 					key := alias + "." + c
 					out[key] = append(out[key], tbl+"."+c)
 				}
 				return true
 			}
-			// Try without schema
-			if i := strings.IndexByte(tbl, '.'); i >= 0 {
-				base := tbl[i+1:]
-				if cols, ok := cat.Columns(base); ok {
-					for _, c := range cols {
-						key := alias + "." + c
-						out[key] = append(out[key], tbl+"."+c)
-					}
-					return true
-				}
-			}
 		}
-		return true // parsed as star; even if nothing found, we handled it
 	}
-
-	// If there were prefixes before star (rare shapes), treat as handled.
-	return true
+	return true // it's a star; we've “handled” it even if nothing expanded
 }
 
 // ----------------- RESOLUTION -----------------
