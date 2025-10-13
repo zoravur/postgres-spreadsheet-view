@@ -14,6 +14,20 @@ type ProvenanceCase struct {
 	ExpectedError string              `json:"expected_error"`
 }
 
+// Test-only demo catalog data (ordered)
+var demoCols = map[string][]string{
+	"actor":        {"id", "name", "first_name", "last_name"},
+	"public.actor": {"id", "name", "first_name", "last_name"},
+	"film":         {"id", "title", "revenue", "actor_id"},
+	"public.film":  {"id", "title", "revenue", "actor_id"},
+}
+
+type DemoCatalog struct{ cols map[string][]string }
+
+func (d *DemoCatalog) Columns(q string) ([]string, bool) { v, ok := d.cols[q]; return v, ok }
+
+var testCatalog = &DemoCatalog{cols: demoCols}
+
 func loadTestCases(t *testing.T) []ProvenanceCase {
 	t.Helper()
 
@@ -35,7 +49,7 @@ func TestProvenanceCases(t *testing.T) {
 	cases := loadTestCases(t)
 	for _, c := range cases {
 		t.Run(c.ID, func(t *testing.T) {
-			got, err := ResolveProvenance(c.Query)
+			got, err := ResolveProvenance(c.Query, testCatalog)
 			if c.ExpectedError != "" {
 				if err == nil || err.Error() != c.ExpectedError {
 					t.Errorf("expected error %q, got %v", c.ExpectedError, err)
