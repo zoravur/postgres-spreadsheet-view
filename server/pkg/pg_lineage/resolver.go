@@ -24,6 +24,15 @@ type derivedProv = map[string]map[string][]string
 // Legacy single-source map (kept for resolution fallbacks).
 type derivedSchemas = map[string]map[string]string
 
+// --- resolver context ---
+type ctx struct {
+	cat   Catalog
+	scope map[string]string // alias -> base table (schema-qualified) OR -> alias/name for derived
+	dc    derivedCols       // derived: alias/name -> ordered output cols
+	dp    derivedProv       // derived: alias/name -> output col -> []sources
+	der   derivedSchemas    // legacy: alias/name -> output col -> single source
+}
+
 func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 	out := make(map[string][]string)
 
@@ -47,15 +56,18 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		return nil, fmt.Errorf("only SELECT supported")
 	}
 
-	// Scope + derived metadata (for subselects/CTEs).
-	scope := map[string]string{} // alias -> base table (schema-qualified) OR -> alias/name for derived
-	der := derivedSchemas{}
-	dc := derivedCols{}
-	dp := derivedProv{}
+	// Build context (scope + derived metadata for subselects/CTEs).
+	c := &ctx{
+		cat:   cat,
+		scope: map[string]string{},
+		der:   derivedSchemas{},
+		dc:    derivedCols{},
+		dp:    derivedProv{},
+	}
 
-	deriveCTEs(selectStmt, der, dc, dp, cat)
+	c.deriveCTEs(selectStmt)
 	if fromClause, ok := selectStmt["fromClause"].([]any); ok {
-		buildScope(fromClause, scope, der, dc, dp, cat)
+		c.buildScope(fromClause)
 	}
 
 	// Resolve target list.
@@ -68,10 +80,10 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		// ColumnRef (including bare * encoded as ColumnRef with A_Star).
 		if colref, ok := val["ColumnRef"].(map[string]any); ok {
 			if isStar(colref) && len(extractFields(colref)) == 0 {
-				expandBareStar(out, scope, dc, dp, cat)
+				c.expandBareStar(out)
 				continue
 			}
-			if handleStar(out, colref, scope, der, dc, dp, cat) {
+			if c.handleStar(out, colref) {
 				continue
 			}
 			parts := extractFields(colref)
@@ -81,7 +93,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 			if outKey == "" {
 				outKey = strings.Join(parts, ".")
 			}
-			src, err := resolveColumn(parts, scope, der, dc, dp, cat)
+			src, err := c.resolveColumn(parts)
 			if err != nil {
 				return nil, err
 			}
@@ -90,7 +102,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		}
 
 		// Funcs/ops: collect inner ColumnRefs.
-		if sources := collectExprSources(val, scope, der, dc, dp, cat); len(sources) > 0 {
+		if sources := c.collectExprSources(val); len(sources) > 0 {
 			if outKey == "" {
 				outKey = renderExprKey(val)
 			}
@@ -103,30 +115,30 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 
 // ----------------- BUILD SCOPE -----------------
 
-func buildScope(from []any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) {
+func (c *ctx) buildScope(from []any) {
 	for _, n := range from {
 		node, _ := n.(map[string]any)
 		switch {
 		case node["RangeVar"] != nil:
-			addRangeVar(scope, der, dc, dp, node["RangeVar"].(map[string]any), cat)
+			c.addRangeVar(node["RangeVar"].(map[string]any))
 		case node["JoinExpr"] != nil:
-			buildJoinScope(node["JoinExpr"].(map[string]any), scope, der, dc, dp, cat)
+			c.buildJoinScope(node["JoinExpr"].(map[string]any))
 		case node["RangeSubselect"] != nil:
-			addRangeSubselect(scope, der, dc, dp, node["RangeSubselect"].(map[string]any), cat)
+			c.addRangeSubselect(node["RangeSubselect"].(map[string]any))
 		}
 	}
 }
 
-func buildJoinScope(je map[string]any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) {
+func (c *ctx) buildJoinScope(je map[string]any) {
 	if larg := je["larg"]; larg != nil {
-		buildScope([]any{larg}, scope, der, dc, dp, cat)
+		c.buildScope([]any{larg})
 	}
 	if rarg := je["rarg"]; rarg != nil {
-		buildScope([]any{rarg}, scope, der, dc, dp, cat)
+		c.buildScope([]any{rarg})
 	}
 }
 
-func addRangeVar(scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, rv map[string]any, cat Catalog) {
+func (c *ctx) addRangeVar(rv map[string]any) {
 	rel := rv["relname"].(string)
 	if sch, ok := rv["schemaname"].(string); ok && sch != "" {
 		rel = sch + "." + rel
@@ -138,43 +150,47 @@ func addRangeVar(scope map[string]string, der derivedSchemas, dc derivedCols, dp
 		}
 	}
 	// If not in catalog, but present in derived maps, treat as derived (likely a CTE).
-	if _, ok := cat.Columns(rel); !ok {
-		if _, ok := der[rel]; ok || len(dc[rel]) > 0 || len(dp[rel]) > 0 {
-			scope[alias] = rel
+	if _, ok := c.cat.Columns(rel); !ok {
+		if _, ok := c.der[rel]; ok || len(c.dc[rel]) > 0 || len(c.dp[rel]) > 0 {
+			c.scope[alias] = rel
 			return
 		}
 	}
-	scope[alias] = rel
+	c.scope[alias] = rel
 }
 
-func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, rs map[string]any, cat Catalog) {
+func (c *ctx) addRangeSubselect(rs map[string]any) {
 	alias := ""
 	if a, ok := rs["alias"].(map[string]any); ok {
 		alias, _ = a["aliasname"].(string)
 	}
 	if alias != "" {
-		scope[alias] = alias // subselect alias points to itself
+		c.scope[alias] = alias // subselect alias points to itself
 	}
 
 	if sub, ok := rs["subquery"].(map[string]any); ok {
-		if inner, ok := sub["SelectStmt"].(map[string]any); ok {
-			innerScope := map[string]string{}
-			innerDer := derivedSchemas{}
-			innerDC := derivedCols{}
-			innerDP := derivedProv{}
-
-			if from, ok := inner["fromClause"].([]any); ok {
-				buildScope(from, innerScope, innerDer, innerDC, innerDP, cat)
+		if innerSel, ok := sub["SelectStmt"].(map[string]any); ok {
+			// Build inner resolver context
+			innerCtx := &ctx{
+				cat:   c.cat,
+				scope: map[string]string{},
+				der:   derivedSchemas{},
+				dc:    derivedCols{},
+				dp:    derivedProv{},
 			}
 
-			der[alias] = map[string]string{}
-			ensureDP := func(a string) {
-				if _, ok := dp[a]; !ok {
-					dp[a] = map[string][]string{}
-				}
+			if from, ok := innerSel["fromClause"].([]any); ok {
+				innerCtx.buildScope(from)
 			}
 
-			if tlist, ok := inner["targetList"].([]any); ok {
+			// Ensure maps for this alias
+			c.der[alias] = map[string]string{}
+			if _, ok := c.dp[alias]; !ok {
+				c.dp[alias] = map[string][]string{}
+			}
+
+			// Walk inner targetList and compute concrete sources
+			if tlist, ok := innerSel["targetList"].([]any); ok {
 				for _, t := range tlist {
 					rt := t.(map[string]any)["ResTarget"].(map[string]any)
 					key := targetOutputKey(rt)
@@ -189,27 +205,25 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 						if key == "" {
 							key = strings.Join(parts, ".")
 						}
-						if src, err := resolveColumn(parts, innerScope, innerDer, innerDC, innerDP, cat); err == nil {
+						if src, err := innerCtx.resolveColumn(parts); err == nil {
 							name := stripAliasPrefix(key)
-							der[alias][name] = src
-							dc[alias] = append(dc[alias], name)
-							ensureDP(alias)
-							dp[alias][name] = []string{src}
+							c.der[alias][name] = src
+							c.dc[alias] = append(c.dc[alias], name)
+							c.dp[alias][name] = []string{src}
 						}
 						continue
 					}
 
 					// Expression
-					if sources := collectExprSources(val, innerScope, innerDer, innerDC, innerDP, cat); len(sources) > 0 {
+					if sources := innerCtx.collectExprSources(val); len(sources) > 0 {
 						if key == "" {
 							key = renderExprKey(val)
 						}
 						name := stripAliasPrefix(key)
 						uniq := uniqueStrings(sources)
-						der[alias][name] = uniq[0] // legacy
-						dc[alias] = append(dc[alias], name)
-						ensureDP(alias)
-						dp[alias][name] = uniq
+						c.der[alias][name] = uniq[0] // legacy
+						c.dc[alias] = append(c.dc[alias], name)
+						c.dp[alias][name] = uniq
 					}
 				}
 			}
@@ -219,30 +233,30 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 
 // ----------------- STAR EXPANSION -----------------
 
-func expandBareStar(out map[string][]string, scope map[string]string, dc derivedCols, dp derivedProv, cat Catalog) {
-	if len(scope) == 1 {
-		for alias, tbl := range scope {
+func (c *ctx) expandBareStar(out map[string][]string) {
+	if len(c.scope) == 1 {
+		for alias, tbl := range c.scope {
 			// Derived (subselect/CTE)
-			if cols := dc[alias]; len(cols) > 0 {
-				for _, c := range cols {
-					if srcs := dp[alias][c]; len(srcs) > 0 {
-						out[alias+"."+c] = append(out[alias+"."+c], srcs...)
+			if cols := c.dc[alias]; len(cols) > 0 {
+				for _, col := range cols {
+					if srcs := c.dp[alias][col]; len(srcs) > 0 {
+						out[alias+"."+col] = append(out[alias+"."+col], srcs...)
 					}
 				}
 				return
 			}
 			// Base table -> bare names
-			if cols, ok := cat.Columns(tbl); ok {
-				for _, c := range cols {
-					out[c] = append(out[c], tbl+"."+c)
+			if cols, ok := c.cat.Columns(tbl); ok {
+				for _, col := range cols {
+					out[col] = append(out[col], tbl+"."+col)
 				}
 				return
 			}
 			// Try without schema if needed
 			if i := strings.IndexByte(tbl, '.'); i >= 0 {
-				if cols, ok := cat.Columns(tbl[i+1:]); ok {
-					for _, c := range cols {
-						out[c] = append(out[c], tbl+"."+c)
+				if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+					for _, col := range cols {
+						out[col] = append(out[col], tbl+"."+col)
 					}
 					return
 				}
@@ -252,40 +266,32 @@ func expandBareStar(out map[string][]string, scope map[string]string, dc derived
 	}
 
 	// Multiple FROM items: always alias.col
-	for alias, tbl := range scope {
-		if cols := dc[alias]; len(cols) > 0 {
-			for _, c := range cols {
-				if srcs := dp[alias][c]; len(srcs) > 0 {
-					out[alias+"."+c] = append(out[alias+"."+c], srcs...)
+	for alias, tbl := range c.scope {
+		if cols := c.dc[alias]; len(cols) > 0 {
+			for _, col := range cols {
+				if srcs := c.dp[alias][col]; len(srcs) > 0 {
+					out[alias+"."+col] = append(out[alias+"."+col], srcs...)
 				}
 			}
 			continue
 		}
-		if cols, ok := cat.Columns(tbl); ok {
-			for _, c := range cols {
-				out[alias+"."+c] = append(out[alias+"."+c], tbl+"."+c)
+		if cols, ok := c.cat.Columns(tbl); ok {
+			for _, col := range cols {
+				out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 			}
 			continue
 		}
 		if i := strings.IndexByte(tbl, '.'); i >= 0 {
-			if cols, ok := cat.Columns(tbl[i+1:]); ok {
-				for _, c := range cols {
-					out[alias+"."+c] = append(out[alias+"."+c], tbl+"."+c)
+			if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+				for _, col := range cols {
+					out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 				}
 			}
 		}
 	}
 }
 
-func handleStar(
-	out map[string][]string,
-	colref map[string]any,
-	scope map[string]string,
-	der derivedSchemas,
-	dc derivedCols,
-	dp derivedProv,
-	cat Catalog,
-) bool {
+func (c *ctx) handleStar(out map[string][]string, colref map[string]any) bool {
 	if !isStar(colref) {
 		return false
 	}
@@ -295,26 +301,28 @@ func handleStar(
 	}
 
 	alias := parts[0]
-	if cols := dc[alias]; len(cols) > 0 { // derived alias
-		for _, c := range cols {
-			if srcs := dp[alias][c]; len(srcs) > 0 {
-				out[alias+"."+c] = append(out[alias+"."+c], srcs...)
+	// Derived alias
+	if cols := c.dc[alias]; len(cols) > 0 {
+		for _, col := range cols {
+			if srcs := c.dp[alias][col]; len(srcs) > 0 {
+				out[alias+"."+col] = append(out[alias+"."+col], srcs...)
 			}
 		}
 		return true
 	}
 
-	if tbl, ok := scope[alias]; ok { // base alias
-		if cols, ok := cat.Columns(tbl); ok {
-			for _, c := range cols {
-				out[alias+"."+c] = append(out[alias+"."+c], tbl+"."+c)
+	// Base alias
+	if tbl, ok := c.scope[alias]; ok {
+		if cols, ok := c.cat.Columns(tbl); ok {
+			for _, col := range cols {
+				out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 			}
 			return true
 		}
 		if i := strings.IndexByte(tbl, '.'); i >= 0 {
-			if cols, ok := cat.Columns(tbl[i+1:]); ok {
-				for _, c := range cols {
-					out[alias+"."+c] = append(out[alias+"."+c], tbl+"."+c)
+			if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+				for _, col := range cols {
+					out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 				}
 				return true
 			}
@@ -325,30 +333,30 @@ func handleStar(
 
 // ----------------- RESOLUTION -----------------
 
-func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) (string, error) {
+func (c *ctx) resolveColumn(parts []string) (string, error) {
 	switch len(parts) {
 	case 1: // unqualified
 		col := parts[0]
 
 		// Single FROM item: prefer derived provenance.
-		if len(scope) == 1 {
-			for alias, tbl := range scope {
-				if dpm, ok := dp[alias]; ok {
+		if len(c.scope) == 1 {
+			for alias, tbl := range c.scope {
+				if dpm, ok := c.dp[alias]; ok {
 					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 						return srcs[0], nil
 					}
 				}
-				if dpm, ok := dp[tbl]; ok {
+				if dpm, ok := c.dp[tbl]; ok {
 					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 						return srcs[0], nil
 					}
 				}
-				if dsm, ok := der[alias]; ok {
+				if dsm, ok := c.der[alias]; ok {
 					if src, ok := dsm[col]; ok {
 						return src, nil
 					}
 				}
-				if dsm, ok := der[tbl]; ok {
+				if dsm, ok := c.der[tbl]; ok {
 					if src, ok := dsm[col]; ok {
 						return src, nil
 					}
@@ -358,16 +366,16 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 
 		// Otherwise: unique-across-scope via catalog.
 		cands := []string{}
-		for _, tbl := range scope {
-			if hasColumn(cat, tbl, col) {
+		for _, tbl := range c.scope {
+			if hasColumn(c.cat, tbl, col) {
 				cands = append(cands, tbl)
 			}
 		}
 		if len(cands) == 1 {
 			return cands[0] + "." + col, nil
 		}
-		if len(scope) == 1 {
-			for _, tbl := range scope {
+		if len(c.scope) == 1 {
+			for _, tbl := range c.scope {
 				return tbl + "." + col, nil
 			}
 		}
@@ -377,23 +385,23 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 		alias := parts[0]
 		col := parts[1]
 
-		if tbl, ok := scope[alias]; ok {
-			if dpm, ok := dp[alias]; ok {
+		if tbl, ok := c.scope[alias]; ok {
+			if dpm, ok := c.dp[alias]; ok {
 				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 					return srcs[0], nil
 				}
 			}
-			if dpm, ok := dp[tbl]; ok {
+			if dpm, ok := c.dp[tbl]; ok {
 				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 					return srcs[0], nil
 				}
 			}
-			if dsm, ok := der[alias]; ok {
+			if dsm, ok := c.der[alias]; ok {
 				if src, ok := dsm[col]; ok {
 					return src, nil
 				}
 			}
-			if dsm, ok := der[tbl]; ok {
+			if dsm, ok := c.der[tbl]; ok {
 				if src, ok := dsm[col]; ok {
 					return src, nil
 				}
@@ -410,14 +418,14 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 
 // ----------------- EXPRESSION HANDLING -----------------
 
-func collectExprSources(node map[string]any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) []string {
+func (c *ctx) collectExprSources(node map[string]any) []string {
 	if node == nil {
 		return nil
 	}
 	// ColumnRef
 	if colref, ok := node["ColumnRef"].(map[string]any); ok {
 		if parts := extractFields(colref); len(parts) > 0 {
-			if src, err := resolveColumn(parts, scope, der, dc, dp, cat); err == nil {
+			if src, err := c.resolveColumn(parts); err == nil {
 				return []string{src}
 			}
 		}
@@ -429,7 +437,7 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 		if args, ok := fn["args"].([]any); ok {
 			for _, a := range args {
 				if m, ok := a.(map[string]any); ok {
-					out = append(out, collectExprSources(m, scope, der, dc, dp, cat)...)
+					out = append(out, c.collectExprSources(m)...)
 				}
 			}
 		}
@@ -439,10 +447,10 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 	if ae, ok := node["A_Expr"].(map[string]any); ok {
 		var out []string
 		if l, ok := ae["lexpr"].(map[string]any); ok {
-			out = append(out, collectExprSources(l, scope, der, dc, dp, cat)...)
+			out = append(out, c.collectExprSources(l)...)
 		}
 		if r, ok := ae["rexpr"].(map[string]any); ok {
-			out = append(out, collectExprSources(r, scope, der, dc, dp, cat)...)
+			out = append(out, c.collectExprSources(r)...)
 		}
 		return out
 	}
@@ -455,11 +463,11 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 				case []any:
 					for _, it := range vv {
 						if m, ok := it.(map[string]any); ok {
-							out = append(out, collectExprSources(m, scope, der, dc, dp, cat)...)
+							out = append(out, c.collectExprSources(m)...)
 						}
 					}
 				case map[string]any:
-					out = append(out, collectExprSources(vv, scope, der, dc, dp, cat)...)
+					out = append(out, c.collectExprSources(vv)...)
 				}
 			}
 			return out
@@ -602,7 +610,9 @@ func hasColumn(cat Catalog, tbl, col string) bool {
 	return false
 }
 
-func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) {
+// ----------------- CTE DERIVATION -----------------
+
+func (c *ctx) deriveCTEs(selectStmt map[string]any) {
 	with, ok := selectStmt["withClause"].(map[string]any)
 	if !ok {
 		return
@@ -618,25 +628,28 @@ func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, d
 		if !ok {
 			continue
 		}
-		inner, ok := q["SelectStmt"].(map[string]any)
+		innerSel, ok := q["SelectStmt"].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		innerScope := map[string]string{}
-		innerDer := derivedSchemas{}
-		innerDC := derivedCols{}
-		innerDP := derivedProv{}
-		if from, ok := inner["fromClause"].([]any); ok {
-			buildScope(from, innerScope, innerDer, innerDC, innerDP, cat)
+		innerCtx := &ctx{
+			cat:   c.cat,
+			scope: map[string]string{},
+			der:   derivedSchemas{},
+			dc:    derivedCols{},
+			dp:    derivedProv{},
+		}
+		if from, ok := innerSel["fromClause"].([]any); ok {
+			innerCtx.buildScope(from)
 		}
 
-		der[name] = map[string]string{}
-		if _, ok := dp[name]; !ok {
-			dp[name] = map[string][]string{}
+		c.der[name] = map[string]string{}
+		if _, ok := c.dp[name]; !ok {
+			c.dp[name] = map[string][]string{}
 		}
 
-		if tlist, ok := inner["targetList"].([]any); ok {
+		if tlist, ok := innerSel["targetList"].([]any); ok {
 			for _, t := range tlist {
 				rt := t.(map[string]any)["ResTarget"].(map[string]any)
 				colKey := targetOutputKey(rt)
@@ -652,24 +665,24 @@ func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, d
 						colKey = strings.Join(parts, ".")
 					}
 					nameOut := stripAliasPrefix(colKey)
-					if src, err := resolveColumn(parts, innerScope, innerDer, innerDC, innerDP, cat); err == nil {
-						der[name][nameOut] = src
-						dc[name] = append(dc[name], nameOut)
-						dp[name][nameOut] = []string{src}
+					if src, err := innerCtx.resolveColumn(parts); err == nil {
+						c.der[name][nameOut] = src
+						c.dc[name] = append(c.dc[name], nameOut)
+						c.dp[name][nameOut] = []string{src}
 					}
 					continue
 				}
 
 				// Expression
-				if srcs := collectExprSources(val, innerScope, innerDer, innerDC, innerDP, cat); len(srcs) > 0 {
+				if srcs := innerCtx.collectExprSources(val); len(srcs) > 0 {
 					u := uniqueStrings(srcs)
 					if colKey == "" {
 						colKey = renderExprKey(val)
 					}
 					nameOut := stripAliasPrefix(colKey)
-					der[name][nameOut] = u[0]
-					dc[name] = append(dc[name], nameOut)
-					dp[name][nameOut] = u
+					c.der[name][nameOut] = u[0]
+					c.dc[name] = append(c.dc[name], nameOut)
+					c.dp[name][nameOut] = u
 				}
 			}
 		}

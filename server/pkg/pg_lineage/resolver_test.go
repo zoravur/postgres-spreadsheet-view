@@ -67,8 +67,12 @@ func equalProv(a, b map[string][]string) bool {
 
 func TestProvenanceCases(t *testing.T) {
 	cases := loadTestCases(t)
+
+	passed := 0
+	total := len(cases)
+
 	for _, c := range cases {
-		t.Run(c.ID, func(t *testing.T) {
+		if t.Run(c.ID, func(t *testing.T) {
 			got, err := ResolveProvenance(c.Query, testCatalog)
 
 			if c.ExpectedError != "" {
@@ -82,8 +86,13 @@ func TestProvenanceCases(t *testing.T) {
 			}
 
 			if !equalProv(got, c.Expected) {
-				t.Fatalf("provenance mismatch\nexpected: %#v\ngot:      %#v", sortMapValues(c.Expected), sortMapValues(got))
+				t.Fatalf("provenance mismatch\nexpected: %#v\ngot:      %#v",
+					sortMapValues(c.Expected), sortMapValues(got))
 			}
-		})
+		}) {
+			passed++
+		}
 	}
+
+	t.Logf("%d/%d test cases passed", passed, total)
 }
