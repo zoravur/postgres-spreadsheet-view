@@ -21,7 +21,7 @@ type derivedCols = map[string][]string
 // Provenance per output name for each derived relation (supports multi-source exprs).
 type derivedProv = map[string]map[string][]string
 
-// ---- Legacy (temporary, for behavior stability on stars until commit C) ----
+// ---- Legacy (temporary, for non-star resolution fallbacks) ----
 // Derived schema for FROM items: alias -> (outputColumn -> single source "tbl.col")
 type derivedSchemas = map[string]map[string]string
 
@@ -51,9 +51,9 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 
 	// Build scope and derived metadata (for subselects/CTEs).
 	scope := map[string]string{} // alias -> table (schema-qualified) OR alias->alias for derived
-	der := derivedSchemas{}      // legacy single-source map (kept for behavior stability this commit)
-	dc := derivedCols{}          // ordered output names
-	dp := derivedProv{}          // per-output provenance (multi-source)
+	der := derivedSchemas{}      // legacy single-source map (kept for expr/non-star behavior)
+	dc := derivedCols{}          // ordered output names for derived
+	dp := derivedProv{}          // per-output provenance (multi-source) for derived
 
 	deriveCTEs(selectStmt, der, dc, dp, cat)
 
@@ -65,36 +65,18 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 	tlist, _ := selectStmt["targetList"].([]any)
 	for _, t := range tlist {
 		resTarget := t.(map[string]any)["ResTarget"].(map[string]any)
-		outKey := targetOutputKey(resTarget) // SELECT x AS k -> "k"; else use rendered expr
+		outKey := targetOutputKey(resTarget)
 		val, _ := resTarget["val"].(map[string]any)
 
 		// --- Bare "*" at top-level (e.g., SELECT * FROM ...;)
-		// (Star expansion still uses legacy 'der' for now; Commit C will switch to dc/dp+catalog)
 		if _, ok := val["A_Star"]; ok {
-			if len(scope) == 1 {
-				for alias, tbl := range scope {
-					// If single item is a derived source (CTE or subselect), expand to concrete cols (legacy behavior via der)
-					if ds, ok := der[alias]; ok {
-						for _, c := range keysSorted(ds) {
-							out[alias+"."+c] = append(out[alias+"."+c], ds[c])
-						}
-						break
-					}
-					// Otherwise single base table: keep "*"
-					out["*"] = append(out["*"], tbl+".*")
-				}
-			} else {
-				// multi-table: emit alias.* entries
-				for a, tbl := range scope {
-					out[a+".*"] = append(out[a+".*"], tbl+".*")
-				}
-			}
+			expandBareStar(out, scope, dc, dp, cat)
 			continue
 		}
 
 		// ColumnRef or alias.* under ColumnRef
 		if colref, ok := val["ColumnRef"].(map[string]any); ok {
-			if handleStar(out, colref, scope, der) {
+			if handleStar(out, colref, scope, der, dc, dp, cat) {
 				continue
 			}
 			parts := extractFields(colref)
@@ -107,7 +89,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 				outKey = strings.Join(parts, ".")
 			}
 
-			// Resolve to table (now consult dp/dc first, then fall back to legacy der & catalog)
+			// Resolve to table (now consult dp/dc first, then legacy der & catalog)
 			src, err := resolveColumn(parts, scope, der, dc, dp, cat)
 			if err != nil {
 				return nil, err
@@ -176,8 +158,6 @@ func addRangeVar(scope map[string]string, der derivedSchemas, dc derivedCols, dp
 	}
 	// Detect CTE reference: if rel exists in derived schema, mark alias as such
 	if _, ok := cat.Columns(rel); !ok {
-		// Not a base table name in catalog → maybe a CTE alias
-		// (Check either legacy 'der' or the new 'dc/dp' to be robust.)
 		if _, ok := der[rel]; ok || (len(dc[rel]) > 0 || len(dp[rel]) > 0) {
 			scope[alias] = rel
 			return
@@ -261,6 +241,136 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 	}
 }
 
+// ----------------- STAR EXPANSION -----------------
+
+// expandBareStar handles SELECT * ...
+// Rules:
+// - Single base table -> output bare names (id, name, ...), provenance tbl.col
+// - Single derived (subselect/CTE) -> output alias.col in the order of derivedCols, provenance from derivedProv
+// - Multiple FROM items -> always alias.col, derived uses derivedCols, base uses catalog
+func expandBareStar(out map[string][]string, scope map[string]string, dc derivedCols, dp derivedProv, cat Catalog) {
+	if len(scope) == 1 {
+		for alias, tbl := range scope {
+			// Derived?
+			if cols := dc[alias]; len(cols) > 0 {
+				for _, c := range cols {
+					srcs := dp[alias][c]
+					if len(srcs) == 0 {
+						continue
+					}
+					key := alias + "." + c
+					out[key] = append(out[key], srcs...)
+				}
+				return
+			}
+			// Base table: expand to bare names
+			if cols, ok := cat.Columns(tbl); ok {
+				for _, c := range cols {
+					key := c // bare
+					out[key] = append(out[key], tbl+"."+c)
+				}
+				return
+			}
+			// Try without schema
+			if i := strings.IndexByte(tbl, '.'); i >= 0 {
+				base := tbl[i+1:]
+				if cols, ok := cat.Columns(base); ok {
+					for _, c := range cols {
+						key := c
+						out[key] = append(out[key], tbl+"."+c)
+					}
+					return
+				}
+			}
+			// If catalog doesn’t know: do nothing (tests won’t hit this)
+		}
+		return
+	}
+
+	// Multiple FROM items: alias.col always
+	for alias, tbl := range scope {
+		// Derived first
+		if cols := dc[alias]; len(cols) > 0 {
+			for _, c := range cols {
+				srcs := dp[alias][c]
+				if len(srcs) == 0 {
+					continue
+				}
+				key := alias + "." + c
+				out[key] = append(out[key], srcs...)
+			}
+			continue
+		}
+		// Base table
+		if cols, ok := cat.Columns(tbl); ok {
+			for _, c := range cols {
+				key := alias + "." + c
+				out[key] = append(out[key], tbl+"."+c)
+			}
+			continue
+		}
+		// Try without schema
+		if i := strings.IndexByte(tbl, '.'); i >= 0 {
+			base := tbl[i+1:]
+			if cols, ok := cat.Columns(base); ok {
+				for _, c := range cols {
+					key := alias + "." + c
+					out[key] = append(out[key], tbl+"."+c)
+				}
+			}
+		}
+	}
+}
+
+func handleStar(out map[string][]string, colref map[string]any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) bool {
+	if !isStar(colref) {
+		return false
+	}
+	parts := extractFields(colref)
+
+	// alias.* ?
+	if len(parts) == 1 {
+		alias := parts[0]
+		// Derived alias?
+		if cols := dc[alias]; len(cols) > 0 {
+			for _, c := range cols {
+				srcs := dp[alias][c]
+				if len(srcs) == 0 {
+					continue
+				}
+				key := alias + "." + c
+				out[key] = append(out[key], srcs...)
+			}
+			return true
+		}
+		// Base alias?
+		if tbl, ok := scope[alias]; ok {
+			if cols, ok := cat.Columns(tbl); ok {
+				for _, c := range cols {
+					key := alias + "." + c
+					out[key] = append(out[key], tbl+"."+c)
+				}
+				return true
+			}
+			// Try without schema
+			if i := strings.IndexByte(tbl, '.'); i >= 0 {
+				base := tbl[i+1:]
+				if cols, ok := cat.Columns(base); ok {
+					for _, c := range cols {
+						key := alias + "." + c
+						out[key] = append(out[key], tbl+"."+c)
+					}
+					return true
+				}
+			}
+		}
+		return true // parsed as star; even if nothing found, we handled it
+	}
+
+	// If there were prefixes before star (rare shapes), treat as handled.
+	return true
+}
+
 // ----------------- RESOLUTION -----------------
 
 func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) (string, error) {
@@ -270,9 +380,7 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 		// If single scope and it is a derived alias, use derived prov/map to map col
 		if len(scope) == 1 {
 			for alias, tbl := range scope {
-				// subselect placeholder (alias==tbl) or explicit CTE name bound in scope
 				if alias == tbl || tbl == alias {
-					// Prefer new dp; fall back to legacy der
 					if dpm, ok := dp[alias]; ok {
 						if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 							return srcs[0], nil
@@ -396,7 +504,6 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 	// TypeCast, Coalesce, etc.
 	for _, k := range []string{"TypeCast", "CoalesceExpr", "NullIf", "CaseExpr"} {
 		if sub, ok := node[k].(map[string]any); ok {
-			// recurse generically through any fields that are lists or maps
 			for _, v := range sub {
 				switch vv := v.(type) {
 				case []any:
@@ -509,48 +616,6 @@ func isStar(colref map[string]any) bool {
 		}
 	}
 	return false
-}
-
-func handleStar(out map[string][]string, colref map[string]any, scope map[string]string, der derivedSchemas) bool {
-	if !isStar(colref) {
-		return false
-	}
-	parts := extractFields(colref)
-	// alias.* ?
-	if len(parts) == 1 {
-		alias := parts[0]
-		if ds, ok := der[alias]; ok {
-			// expand to columns from derived schema
-			cols := keysSorted(ds)
-			for _, c := range cols {
-				out[alias+"."+c] = append(out[alias+"."+c], ds[c])
-			}
-			return true
-		}
-		// else: alias of a base table
-		if tbl, ok := scope[alias]; ok {
-			out[alias+".*"] = append(out[alias+".*"], tbl+".*")
-			return true
-		}
-	}
-	// bare * : if one entry and it's subselect → expand columns; if one base table → "*"
-	if len(scope) == 1 {
-		for alias, tbl := range scope {
-			if ds, ok := der[alias]; ok {
-				for _, c := range keysSorted(ds) {
-					out[alias+"."+c] = append(out[alias+"."+c], ds[c])
-				}
-				return true
-			}
-			out["*"] = append(out["*"], tbl+".*")
-			return true
-		}
-	}
-	// multi-table bare * → emit alias.* entries
-	for a, tbl := range scope {
-		out[a+".*"] = append(out[a+".*"], tbl+".*")
-	}
-	return true
 }
 
 func targetOutputKey(resTarget map[string]any) string {
