@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -45,45 +47,43 @@ func loadTestCases(t *testing.T) []ProvenanceCase {
 	return cases
 }
 
+// --- helpers to compare full maps (including unexpected keys) ---
+
+func sortMapValues(m map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		cp := append([]string(nil), v...)
+		sort.Strings(cp)
+		out[k] = cp
+	}
+	return out
+}
+
+func equalProv(a, b map[string][]string) bool {
+	a = sortMapValues(a)
+	b = sortMapValues(b)
+	return reflect.DeepEqual(a, b)
+}
+
 func TestProvenanceCases(t *testing.T) {
 	cases := loadTestCases(t)
 	for _, c := range cases {
 		t.Run(c.ID, func(t *testing.T) {
 			got, err := ResolveProvenance(c.Query, testCatalog)
+
 			if c.ExpectedError != "" {
 				if err == nil || err.Error() != c.ExpectedError {
-					t.Errorf("expected error %q, got %v", c.ExpectedError, err)
+					t.Fatalf("expected error %q, got %v", c.ExpectedError, err)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			for k, want := range c.Expected {
-				gotVals := got[k]
-				if !sameSet(want, gotVals) {
-					t.Errorf("for %q: expected %v, got %v", k, want, gotVals)
-				}
+
+			if !equalProv(got, c.Expected) {
+				t.Fatalf("provenance mismatch\nexpected: %#v\ngot:      %#v", sortMapValues(c.Expected), sortMapValues(got))
 			}
 		})
 	}
-}
-
-func sameSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	m := map[string]int{}
-	for _, x := range a {
-		m[x]++
-	}
-	for _, y := range b {
-		m[y]--
-	}
-	for _, v := range m {
-		if v != 0 {
-			return false
-		}
-	}
-	return true
 }

@@ -1,142 +1,45 @@
 [
-  {
-    "id": "1A",
-    "query": "SELECT id, name FROM actor;",
-    "expected": {
-      "id": ["actor.id"],
-      "name": ["actor.name"]
-    }
-  },
-  {
-    "id": "1B",
-    "query": "SELECT a.id, a.name FROM actor AS a;",
-    "expected": {
-      "a.id": ["actor.id"],
-      "a.name": ["actor.name"]
-    }
-  },
-  {
-    "id": "1C",
-    "query": "SELECT * FROM actor;",
-    "expected": {
-      "id": ["actor.id"],
-      "name": ["actor.name"],
-      "first_name": ["actor.first_name"],
-      "last_name": ["actor.last_name"]
-    }
-  },
-  {
-    "id": "2A",
-    "query": "SELECT a.first_name, f.title FROM actor a JOIN film f ON a.id = f.actor_id;",
-    "expected": {
-      "a.first_name": ["actor.first_name"],
-      "f.title": ["film.title"]
-    }
-  },
-  {
-    "id": "2B",
-    "query": "SELECT first_name, title FROM actor a JOIN film f ON a.id = f.actor_id;",
-    "expected": {
-      "first_name": ["actor.first_name"],
-      "title": ["film.title"]
-    }
-  },
-  {
-    "id": "3A",
-    "query": "SELECT first_name AS fname FROM actor;",
-    "expected": {
-      "fname": ["actor.first_name"]
-    }
-  },
-  {
-    "id": "3C",
-    "query": "SELECT a.first_name || ' ' || a.last_name AS fullname FROM actor a;",
-    "expected": {
-      "fullname": ["actor.first_name", "actor.last_name"]
-    }
-  },
-  {
-    "id": "4A",
-    "query": "SELECT * FROM (SELECT id, name FROM actor) AS sub;",
-    "expected": {
-      "sub.id": ["actor.id"],
-      "sub.name": ["actor.name"]
-    }
-  },
-  {
-    "id": "4B",
-    "query": "SELECT id FROM (SELECT id FROM actor) AS sub;",
-    "expected": {
-      "id": ["actor.id"]
-    }
-  },
-  {
-    "id": "5A",
-    "query": "SELECT p.id FROM public.actor p;",
-    "expected": {
-      "p.id": ["public.actor.id"]
-    }
-  },
-  {
-    "id": "6A",
-    "query": "SELECT id FROM actor a JOIN film f ON a.id = f.actor_id;",
-    "expected_error": "ambiguous column id"
-  },
-  {
-    "id": "6C",
-    "query": "SELECT x.id FROM actor;",
-    "expected_error": "alias x not found"
-  },
-  {
-    "id": "7C",
-    "query": "SELECT a.id, SUM(f.revenue) FROM actor a JOIN film f ON a.id = f.actor_id GROUP BY a.id;",
-    "expected": {
-      "a.id": ["actor.id"],
-      "SUM(f.revenue)": ["film.revenue"]
-    }
-  },
-  {
-    "id": "8A",
-    "query": "WITH sub AS (SELECT id, name FROM actor) SELECT * FROM sub;",
-    "expected": {
-      "sub.id": ["actor.id"],
-      "sub.name": ["actor.name"]
-    }
-  },
-  {
-    "id": "9A",
-    "query": "SELECT a.*, f.title FROM actor a JOIN film f ON a.id = f.actor_id;",
-    "expected": {
-      "a.id": ["actor.id"],
-      "a.first_name": ["actor.first_name"],
-      "a.last_name": ["actor.last_name"],
-      "a.name": ["actor.name"],
-      "f.title": ["film.title"]
-    }
-  },
-  {
-    "id": "10A",
-    "query": "SELECT a.id FROM actor a, film AS actor;",
-    "expected": {
-      "a.id": ["actor.id"]
-    }
-  },
-  {
-    "id": "11A",
-    "query": "SELECT LENGTH(a.name) FROM actor a;",
-    "expected": {
-      "LENGTH(a.name)": ["actor.name"]
-    }
-  },
-  {
-    "id": "12A",
-    "query": "SELECT a.*, b.id FROM actor a, film b;",
-    "expected": {
-      "a.id": ["actor.id"],
-      "a.first_name": ["actor.first_name"],
-      "a.last_name": ["actor.last_name"],
-      "a.name": ["actor.name"],
-      "b.id": ["film.id"]
-    }
-  }
+  { "id": "1A", "query": "SELECT id, name FROM actor;", "expected": { "id": ["actor.id"], "name": ["actor.name"] } },
+  { "id": "1B", "query": "SELECT a.id, a.name FROM actor AS a;", "expected": { "a.id": ["actor.id"], "a.name": ["actor.name"] } },
+  { "id": "1C", "query": "SELECT * FROM actor;", "expected": { "id": ["actor.id"], "name": ["actor.name"], "first_name": ["actor.first_name"], "last_name": ["actor.last_name"] } },
+  { "id": "2A", "query": "SELECT a.first_name, f.title FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "a.first_name": ["actor.first_name"], "f.title": ["film.title"] } },
+  { "id": "2B", "query": "SELECT first_name, title FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "first_name": ["actor.first_name"], "title": ["film.title"] } },
+  { "id": "3A", "query": "SELECT first_name AS fname FROM actor;", "expected": { "fname": ["actor.first_name"] } },
+  { "id": "3C", "query": "SELECT a.first_name || ' ' || a.last_name AS fullname FROM actor a;", "expected": { "fullname": ["actor.first_name", "actor.last_name"] } },
+  { "id": "4A", "query": "SELECT * FROM (SELECT id, name FROM actor) AS sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "4B", "query": "SELECT id FROM (SELECT id FROM actor) AS sub;", "expected": { "id": ["actor.id"] } },
+  { "id": "5A", "query": "SELECT p.id FROM public.actor p;", "expected": { "p.id": ["public.actor.id"] } },
+  { "id": "6A", "query": "SELECT id FROM actor a JOIN film f ON a.id = f.actor_id;", "expected_error": "ambiguous column id" },
+  { "id": "6C", "query": "SELECT x.id FROM actor;", "expected_error": "alias x not found" },
+  { "id": "7C", "query": "SELECT a.id, SUM(f.revenue) FROM actor a JOIN film f ON a.id = f.actor_id GROUP BY a.id;", "expected": { "a.id": ["actor.id"], "SUM(f.revenue)": ["film.revenue"] } },
+  { "id": "8A", "query": "WITH sub AS (SELECT id, name FROM actor) SELECT * FROM sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "9A", "query": "SELECT a.*, f.title FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "a.id": ["actor.id"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"], "a.name": ["actor.name"], "f.title": ["film.title"] } },
+  { "id": "10A", "query": "SELECT a.id FROM actor a, film AS actor;", "expected": { "a.id": ["actor.id"] } },
+  { "id": "11A", "query": "SELECT LENGTH(a.name) FROM actor a;", "expected": { "LENGTH(a.name)": ["actor.name"] } },
+  { "id": "12A", "query": "SELECT a.*, b.id FROM actor a, film b;", "expected": { "a.id": ["actor.id"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"], "a.name": ["actor.name"], "b.id": ["film.id"] } },
+  { "id": "S1",  "query": "SELECT id, name FROM actor;", "expected": { "id": ["actor.id"], "name": ["actor.name"] } },
+  { "id": "S2",  "query": "SELECT p.id FROM public.actor AS p;", "expected": { "p.id": ["public.actor.id"] } },
+  { "id": "S3",  "query": "SELECT * FROM actor;", "expected": { "id": ["actor.id"], "name": ["actor.name"], "first_name": ["actor.first_name"], "last_name": ["actor.last_name"] } },
+  { "id": "S4",  "query": "SELECT a.* FROM actor a;", "expected": { "a.id": ["actor.id"], "a.name": ["actor.name"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"] } },
+  { "id": "S5",  "query": "SELECT * FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "a.id": ["actor.id"], "a.name": ["actor.name"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"], "f.id": ["film.id"], "f.title": ["film.title"], "f.revenue": ["film.revenue"], "f.actor_id": ["film.actor_id"] } },
+  { "id": "S6",  "query": "SELECT first_name, title FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "first_name": ["actor.first_name"], "title": ["film.title"] } },
+  { "id": "S7",  "query": "SELECT id FROM actor a JOIN film f ON a.id = f.actor_id;", "expected_error": "ambiguous column id" },
+  { "id": "S8",  "query": "SELECT x.id FROM actor;", "expected_error": "alias x not found" },
+  { "id": "S9",  "query": "SELECT a.first_name || ' ' || a.last_name AS fullname, LENGTH(a.name) AS ln FROM actor a;", "expected": { "fullname": ["actor.first_name", "actor.last_name"], "ln": ["actor.name"] } },
+  { "id": "S10", "query": "SELECT a.id, SUM(f.revenue) AS s FROM actor a JOIN film f ON a.id = f.actor_id GROUP BY a.id;", "expected": { "a.id": ["actor.id"], "s": ["film.revenue"] } },
+  { "id": "S11", "query": "SELECT sub.* FROM (SELECT id, name FROM actor) AS sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "S12", "query": "SELECT * FROM (SELECT id, name FROM actor) AS sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "S13", "query": "SELECT t.* FROM (SELECT * FROM (SELECT id, name FROM actor) s) t;", "expected": { "t.id": ["actor.id"], "t.name": ["actor.name"] } },
+  { "id": "S14", "query": "WITH sub AS (SELECT id, name FROM actor) SELECT * FROM sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "S15", "query": "WITH sub AS (SELECT id, name FROM actor) SELECT sub.* FROM sub;", "expected": { "sub.id": ["actor.id"], "sub.name": ["actor.name"] } },
+  { "id": "S16", "query": "WITH sub AS (SELECT a.id, a.first_name || ' ' || a.last_name AS full FROM actor a) SELECT sub.id, sub.full FROM sub;", "expected": { "sub.id": ["actor.id"], "sub.full": ["actor.first_name", "actor.last_name"] } },
+  { "id": "S17", "query": "SELECT p.*, f.title FROM public.actor p JOIN film f ON p.id = f.actor_id;", "expected": { "p.id": ["public.actor.id"], "p.name": ["public.actor.name"], "p.first_name": ["public.actor.first_name"], "p.last_name": ["public.actor.last_name"], "f.title": ["film.title"] } },
+  { "id": "S18", "query": "SELECT (a.id)::text AS id_txt, COALESCE(a.name, 'n/a') AS nm, NULLIF(a.first_name, a.last_name) AS nf, CASE WHEN a.first_name = '' THEN a.last_name ELSE a.first_name END AS pick FROM actor a;", "expected": { "id_txt": ["actor.id"], "nm": ["actor.name"], "nf": ["actor.first_name", "actor.last_name"], "pick": ["actor.first_name", "actor.last_name"] } },
+  { "id": "S19", "query": "SELECT a.id AS actor_id, f.title AS film_title FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "actor_id": ["actor.id"], "film_title": ["film.title"] } },
+  { "id": "S20", "query": "SELECT a.*, f.title, f.* FROM actor a JOIN film f ON a.id = f.actor_id;", "expected": { "a.id": ["actor.id"], "a.name": ["actor.name"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"], "f.title": ["film.title"], "f.id": ["film.id"], "f.revenue": ["film.revenue"], "f.actor_id": ["film.actor_id"] } },
+  { "id": "S21", "query": "SELECT d.* FROM (SELECT a.id AS aid, f.title FROM actor a JOIN film f ON a.id = f.actor_id) d;", "expected": { "d.aid": ["actor.id"], "d.title": ["film.title"] } },
+  { "id": "S22", "query": "SELECT * FROM actor a, film f;", "expected": { "a.id": ["actor.id"], "a.name": ["actor.name"], "a.first_name": ["actor.first_name"], "a.last_name": ["actor.last_name"], "f.id": ["film.id"], "f.title": ["film.title"], "f.revenue": ["film.revenue"], "f.actor_id": ["film.actor_id"] } },
+  { "id": "S23", "query": "SELECT s.full FROM (SELECT a.first_name || ' ' || a.last_name AS full FROM actor a) s;", "expected": { "s.full": ["actor.first_name", "actor.last_name"] } },
+  { "id": "S24", "query": "SELECT first_name FROM actor;", "expected": { "first_name": ["actor.first_name"] } },
+  { "id": "S25", "query": "SELECT public.actor.id FROM actor;", "expected": { "public.actor.id": ["public.actor.id"] } }
 ]
