@@ -13,7 +13,7 @@ type Catalog interface {
 	Columns(qualified string) ([]string, bool)
 }
 
-// ---- New: derived outputs data we’ll use in later commits ----
+// ---- Derived outputs data ----
 
 // Ordered output column names for each derived relation (subselect/CTE).
 type derivedCols = map[string][]string
@@ -21,7 +21,7 @@ type derivedCols = map[string][]string
 // Provenance per output name for each derived relation (supports multi-source exprs).
 type derivedProv = map[string]map[string][]string
 
-// ---- Existing (for backward-compat behavior in this commit) ----
+// ---- Legacy (temporary, for behavior stability on stars until commit C) ----
 // Derived schema for FROM items: alias -> (outputColumn -> single source "tbl.col")
 type derivedSchemas = map[string]map[string]string
 
@@ -52,8 +52,8 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 	// Build scope and derived metadata (for subselects/CTEs).
 	scope := map[string]string{} // alias -> table (schema-qualified) OR alias->alias for derived
 	der := derivedSchemas{}      // legacy single-source map (kept for behavior stability this commit)
-	dc := derivedCols{}          // NEW: ordered output names
-	dp := derivedProv{}          // NEW: per-output provenance (multi-source)
+	dc := derivedCols{}          // ordered output names
+	dp := derivedProv{}          // per-output provenance (multi-source)
 
 	deriveCTEs(selectStmt, der, dc, dp, cat)
 
@@ -69,6 +69,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		val, _ := resTarget["val"].(map[string]any)
 
 		// --- Bare "*" at top-level (e.g., SELECT * FROM ...;)
+		// (Star expansion still uses legacy 'der' for now; Commit C will switch to dc/dp+catalog)
 		if _, ok := val["A_Star"]; ok {
 			if len(scope) == 1 {
 				for alias, tbl := range scope {
@@ -106,8 +107,8 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 				outKey = strings.Join(parts, ".")
 			}
 
-			// Resolve to table (legacy resolver; Commit C/E will start using dc/dp for stars/derived)
-			src, err := resolveColumn(parts, scope, der, cat)
+			// Resolve to table (now consult dp/dc first, then fall back to legacy der & catalog)
+			src, err := resolveColumn(parts, scope, der, dc, dp, cat)
 			if err != nil {
 				return nil, err
 			}
@@ -116,7 +117,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		}
 
 		// FuncCall or operator/concats/etc: collect inner ColumnRefs and attribute
-		if sources := collectExprSources(val, scope, der, cat); len(sources) > 0 {
+		if sources := collectExprSources(val, scope, der, dc, dp, cat); len(sources) > 0 {
 			if outKey == "" {
 				outKey = renderExprKey(val) // e.g., "SUM(f.revenue)" or "LENGTH(a.name)"
 			}
@@ -227,7 +228,7 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 						if key == "" {
 							key = strings.Join(parts, ".")
 						}
-						src, err := resolveColumn(parts, innerScope, innerDer, cat)
+						src, err := resolveColumn(parts, innerScope, innerDer, innerDC, innerDP, cat)
 						if err == nil {
 							name := stripAliasPrefix(key)
 							der[alias][name] = src // legacy single-source
@@ -239,7 +240,7 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 						continue
 					}
 					// For inner expressions, collect sources
-					if sources := collectExprSources(val, innerScope, innerDer, cat); len(sources) > 0 {
+					if sources := collectExprSources(val, innerScope, innerDer, innerDC, innerDP, cat); len(sources) > 0 {
 						if key == "" {
 							key = renderExprKey(val)
 						}
@@ -262,16 +263,23 @@ func addRangeSubselect(scope map[string]string, der derivedSchemas, dc derivedCo
 
 // ----------------- RESOLUTION -----------------
 
-func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, cat Catalog) (string, error) {
+func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) (string, error) {
 	switch len(parts) {
 	case 1: // unqualified
 		col := parts[0]
-		// If single scope and it is a subselect alias, use derived schema to map col
+		// If single scope and it is a derived alias, use derived prov/map to map col
 		if len(scope) == 1 {
 			for alias, tbl := range scope {
-				if alias == tbl { // subselect placeholder
-					if ds, ok := der[alias]; ok {
-						if src, ok := ds[col]; ok {
+				// subselect placeholder (alias==tbl) or explicit CTE name bound in scope
+				if alias == tbl || tbl == alias {
+					// Prefer new dp; fall back to legacy der
+					if dpm, ok := dp[alias]; ok {
+						if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+							return srcs[0], nil
+						}
+					}
+					if dsm, ok := der[alias]; ok {
+						if src, ok := dsm[col]; ok {
 							return src, nil
 						}
 					}
@@ -300,9 +308,14 @@ func resolveColumn(parts []string, scope map[string]string, der derivedSchemas, 
 		col := parts[1]
 		// alias?
 		if tbl, ok := scope[left]; ok {
-			// subselect alias?
-			if ds, ok := der[left]; ok {
-				if src, ok := ds[col]; ok {
+			// Prefer new dp; then legacy der; then base
+			if dpm, ok := dp[left]; ok {
+				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+					return srcs[0], nil
+				}
+			}
+			if dsm, ok := der[left]; ok {
+				if src, ok := dsm[col]; ok {
 					return src, nil
 				}
 			}
@@ -340,7 +353,7 @@ func hasColumn(cat Catalog, tbl, col string) bool {
 
 // ----------------- EXPRESSION HANDLING -----------------
 
-func collectExprSources(node map[string]any, scope map[string]string, der derivedSchemas, cat Catalog) []string {
+func collectExprSources(node map[string]any, scope map[string]string, der derivedSchemas, dc derivedCols, dp derivedProv, cat Catalog) []string {
 	if node == nil {
 		return nil
 	}
@@ -350,7 +363,7 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 	if colref, ok := node["ColumnRef"].(map[string]any); ok {
 		parts := extractFields(colref)
 		if len(parts) > 0 {
-			if src, err := resolveColumn(parts, scope, der, cat); err == nil {
+			if src, err := resolveColumn(parts, scope, der, dc, dp, cat); err == nil {
 				sources = append(sources, src)
 			}
 		}
@@ -362,7 +375,7 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 		if args, ok := fn["args"].([]any); ok {
 			for _, a := range args {
 				if m, ok := a.(map[string]any); ok {
-					sources = append(sources, collectExprSources(m, scope, der, cat)...)
+					sources = append(sources, collectExprSources(m, scope, der, dc, dp, cat)...)
 				}
 			}
 		}
@@ -372,10 +385,10 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 	// A_Expr (binary ops: ||, +, -, etc.)
 	if ae, ok := node["A_Expr"].(map[string]any); ok {
 		if l, ok := ae["lexpr"].(map[string]any); ok {
-			sources = append(sources, collectExprSources(l, scope, der, cat)...)
+			sources = append(sources, collectExprSources(l, scope, der, dc, dp, cat)...)
 		}
 		if r, ok := ae["rexpr"].(map[string]any); ok {
-			sources = append(sources, collectExprSources(r, scope, der, cat)...)
+			sources = append(sources, collectExprSources(r, scope, der, dc, dp, cat)...)
 		}
 		return sources
 	}
@@ -389,11 +402,11 @@ func collectExprSources(node map[string]any, scope map[string]string, der derive
 				case []any:
 					for _, it := range vv {
 						if m, ok := it.(map[string]any); ok {
-							sources = append(sources, collectExprSources(m, scope, der, cat)...)
+							sources = append(sources, collectExprSources(m, scope, der, dc, dp, cat)...)
 						}
 					}
 				case map[string]any:
-					sources = append(sources, collectExprSources(vv, scope, der, cat)...)
+					sources = append(sources, collectExprSources(vv, scope, der, dc, dp, cat)...)
 				}
 			}
 			return sources
@@ -630,7 +643,7 @@ func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, d
 						colKey = strings.Join(parts, ".")
 					}
 					nameOut := stripAliasPrefix(colKey)
-					if src, err := resolveColumn(parts, innerScope, innerDer, cat); err == nil {
+					if src, err := resolveColumn(parts, innerScope, innerDer, innerDC, innerDP, cat); err == nil {
 						// legacy single-source
 						der[name][nameOut] = src
 						// NEW: ordered + multi-source
@@ -640,7 +653,7 @@ func deriveCTEs(selectStmt map[string]any, der derivedSchemas, dc derivedCols, d
 					continue
 				}
 				// Expression: take all sources
-				if srcs := collectExprSources(val, innerScope, innerDer, cat); len(srcs) > 0 {
+				if srcs := collectExprSources(val, innerScope, innerDer, innerDC, innerDP, cat); len(srcs) > 0 {
 					u := uniqueStrings(srcs)
 					if colKey == "" {
 						colKey = renderExprKey(val)
