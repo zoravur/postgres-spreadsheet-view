@@ -21,25 +21,22 @@ type derivedCols = map[string][]string
 // Provenance per output name for each derived relation (supports multi-source exprs).
 type derivedProv = map[string]map[string][]string
 
-// Legacy single-source map (kept for resolution fallbacks).
-type derivedSchemas = map[string]map[string]string
-
-// --- resolver context ---
+// Analysis context (scope + derived metadata).
 type ctx struct {
-	cat   Catalog
 	scope map[string]string // alias -> base table (schema-qualified) OR -> alias/name for derived
-	dc    derivedCols       // derived: alias/name -> ordered output cols
-	dp    derivedProv       // derived: alias/name -> output col -> []sources
-	der   derivedSchemas    // legacy: alias/name -> output col -> single source
+	dc    derivedCols       // ordered output names for derived
+	dp    derivedProv       // per-output provenance (multi-source) for derived
+	cat   Catalog
 }
 
-func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
-	out := make(map[string][]string)
+// ----------------- Entry point -----------------
 
+func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 	raw, err := pg_query.ParseToJSON(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
+
 	var tree map[string]any
 	if err := json.Unmarshal([]byte(raw), &tree); err != nil {
 		return nil, fmt.Errorf("invalid json ast: %w", err)
@@ -56,36 +53,53 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 		return nil, fmt.Errorf("only SELECT supported")
 	}
 
-	// Build context (scope + derived metadata for subselects/CTEs).
 	c := &ctx{
-		cat:   cat,
 		scope: map[string]string{},
-		der:   derivedSchemas{},
 		dc:    derivedCols{},
 		dp:    derivedProv{},
+		cat:   cat,
 	}
 
+	// CTEs first (populate derived maps by CTE name).
 	c.deriveCTEs(selectStmt)
+
+	// Build FROM scope (tables / joins / subselects).
 	if fromClause, ok := selectStmt["fromClause"].([]any); ok {
 		c.buildScope(fromClause)
 	}
 
-	// Resolve target list.
+	// Analyze the SELECT list to compute provenance for top-level outputs.
+	return c.analyzeSelect(selectStmt)
+}
+
+// ----------------- SELECT analysis (top-level rendering) -----------------
+
+func (c *ctx) analyzeSelect(selectStmt map[string]any) (map[string][]string, error) {
+	out := make(map[string][]string)
+
 	tlist, _ := selectStmt["targetList"].([]any)
 	for _, t := range tlist {
 		resTarget := t.(map[string]any)["ResTarget"].(map[string]any)
 		outKey := targetOutputKey(resTarget)
 		val, _ := resTarget["val"].(map[string]any)
 
-		// ColumnRef (including bare * encoded as ColumnRef with A_Star).
+		// ColumnRef (including * and alias.* encoded under ColumnRef).
 		if colref, ok := val["ColumnRef"].(map[string]any); ok {
-			if isStar(colref) && len(extractFields(colref)) == 0 {
-				c.expandBareStar(out)
-				continue
+			if isStar(colref) {
+				fields := extractFields(colref)
+				if len(fields) == 0 {
+					// bare "*"
+					c.expandBareStar(out)
+					continue
+				}
+				if len(fields) == 1 {
+					// alias."*"
+					c.expandAliasStar(fields[0], out)
+					continue
+				}
+				// a.b.* etc.: ignore star and fall through
 			}
-			if c.handleStar(out, colref) {
-				continue
-			}
+
 			parts := extractFields(colref)
 			if len(parts) == 0 {
 				continue
@@ -101,7 +115,7 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 			continue
 		}
 
-		// Funcs/ops: collect inner ColumnRefs.
+		// Funcs/ops/casts/coalesce/case/bool/subquery wrappers: collect sources recursively.
 		if sources := c.collectExprSources(val); len(sources) > 0 {
 			if outKey == "" {
 				outKey = renderExprKey(val)
@@ -111,6 +125,94 @@ func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
 	}
 
 	return out, nil
+}
+
+// ----------------- NEW: relation-level processor (used for CTEs & subselects) -----------------
+
+// processSelect computes the *exposed* outputs of a SelectStmt as if it were a
+// relation in FROM/CTE context. It returns ordered output column names and
+// their provenance. Column names are exposed names (aliases if present; otherwise
+// plain column names without table/alias prefixes).
+func processSelect(sel map[string]any, cat Catalog) ([]string, map[string][]string) {
+	// Local context dedicated to this subselect/CTE.
+	local := &ctx{
+		scope: map[string]string{},
+		dc:    derivedCols{},
+		dp:    derivedProv{},
+		cat:   cat,
+	}
+
+	// Recurse into CTEs inside this SELECT.
+	local.deriveCTEs(sel)
+
+	// Build FROM scope (recursing into nested subselects with processSelect).
+	if from, ok := sel["fromClause"].([]any); ok {
+		local.buildScopeWithProcess(from) // uses processSelect for RangeSubselect
+	}
+
+	// Derive outputs (names + provenance) for this SELECT.
+	cols, prov := local.deriveOutputsForRelation(sel)
+	return cols, prov
+}
+
+// deriveOutputsForRelation walks this SELECT’s targetList and produces the
+// exposed (relation-level) outputs: ordered names + provenance.
+func (c *ctx) deriveOutputsForRelation(selectStmt map[string]any) ([]string, map[string][]string) {
+	var outCols []string
+	outProv := map[string][]string{}
+
+	tlist, _ := selectStmt["targetList"].([]any)
+	for _, t := range tlist {
+		rt := t.(map[string]any)["ResTarget"].(map[string]any)
+		key := targetOutputKey(rt) // alias given?
+		val, _ := rt["val"].(map[string]any)
+
+		// ColumnRef (stars or plain)
+		if colref, ok := val["ColumnRef"].(map[string]any); ok {
+			// Star handling at relation level
+			if isStar(colref) {
+				fields := extractFields(colref)
+				if len(fields) == 0 {
+					// bare "*"
+					c.expandBareStarToRelation(&outCols, outProv)
+					continue
+				}
+				if len(fields) == 1 {
+					// alias."*"
+					c.expandAliasStarToRelation(fields[0], &outCols, outProv)
+					continue
+				}
+				// a.b.* not supported in tests; fall through to ignore the star
+			}
+
+			parts := extractFields(colref)
+			if len(parts) == 0 {
+				continue
+			}
+			if key == "" {
+				key = strings.Join(parts, ".")
+			}
+			name := stripAliasPrefix(key) // relation exposes bare name
+			if src, err := c.resolveColumn(parts); err == nil {
+				outCols = append(outCols, name)
+				outProv[name] = []string{src}
+			}
+			continue
+		}
+
+		// Expressions (funcs/ops/casts/coalesce/case/...): collect sources
+		if srcs := c.collectExprSources(val); len(srcs) > 0 {
+			if key == "" {
+				key = renderExprKey(val)
+			}
+			name := stripAliasPrefix(key)
+			uniq := uniqueStrings(srcs)
+			outCols = append(outCols, name)
+			outProv[name] = uniq
+		}
+	}
+
+	return outCols, outProv
 }
 
 // ----------------- BUILD SCOPE -----------------
@@ -125,6 +227,47 @@ func (c *ctx) buildScope(from []any) {
 			c.buildJoinScope(node["JoinExpr"].(map[string]any))
 		case node["RangeSubselect"] != nil:
 			c.addRangeSubselect(node["RangeSubselect"].(map[string]any))
+		}
+	}
+}
+
+// buildScopeWithProcess does the same as buildScope, but RangeSubselects are
+// populated via processSelect (so nested subselects get fully expanded outputs).
+func (c *ctx) buildScopeWithProcess(from []any) {
+	for _, n := range from {
+		node, _ := n.(map[string]any)
+		switch {
+		case node["RangeVar"] != nil:
+			c.addRangeVar(node["RangeVar"].(map[string]any))
+		case node["JoinExpr"] != nil:
+			je := node["JoinExpr"].(map[string]any)
+			if larg := je["larg"]; larg != nil {
+				c.buildScopeWithProcess([]any{larg})
+			}
+			if rarg := je["rarg"]; rarg != nil {
+				c.buildScopeWithProcess([]any{rarg})
+			}
+		case node["RangeSubselect"] != nil:
+			rs := node["RangeSubselect"].(map[string]any)
+			alias := ""
+			if a, ok := rs["alias"].(map[string]any); ok {
+				alias, _ = a["aliasname"].(string)
+			}
+			if alias != "" {
+				c.scope[alias] = alias // subselect alias points to itself
+			}
+			if sub, ok := rs["subquery"].(map[string]any); ok {
+				if inner, ok := sub["SelectStmt"].(map[string]any); ok {
+					innerCols, innerProv := processSelect(inner, c.cat)
+					if _, ok := c.dp[alias]; !ok {
+						c.dp[alias] = map[string][]string{}
+					}
+					c.dc[alias] = append([]string{}, innerCols...)
+					for k, v := range innerProv {
+						c.dp[alias][k] = append([]string{}, v...)
+					}
+				}
+			}
 		}
 	}
 }
@@ -151,7 +294,7 @@ func (c *ctx) addRangeVar(rv map[string]any) {
 	}
 	// If not in catalog, but present in derived maps, treat as derived (likely a CTE).
 	if _, ok := c.cat.Columns(rel); !ok {
-		if _, ok := c.der[rel]; ok || len(c.dc[rel]) > 0 || len(c.dp[rel]) > 0 {
+		if len(c.dc[rel]) > 0 || len(c.dp[rel]) > 0 {
 			c.scope[alias] = rel
 			return
 		}
@@ -168,71 +311,58 @@ func (c *ctx) addRangeSubselect(rs map[string]any) {
 		c.scope[alias] = alias // subselect alias points to itself
 	}
 
+	// Use the relation-level processor so nested subselects are fully derived.
 	if sub, ok := rs["subquery"].(map[string]any); ok {
-		if innerSel, ok := sub["SelectStmt"].(map[string]any); ok {
-			// Build inner resolver context
-			innerCtx := &ctx{
-				cat:   c.cat,
-				scope: map[string]string{},
-				der:   derivedSchemas{},
-				dc:    derivedCols{},
-				dp:    derivedProv{},
-			}
-
-			if from, ok := innerSel["fromClause"].([]any); ok {
-				innerCtx.buildScope(from)
-			}
-
-			// Ensure maps for this alias
-			c.der[alias] = map[string]string{}
+		if inner, ok := sub["SelectStmt"].(map[string]any); ok {
+			cols, prov := processSelect(inner, c.cat)
 			if _, ok := c.dp[alias]; !ok {
 				c.dp[alias] = map[string][]string{}
 			}
-
-			// Walk inner targetList and compute concrete sources
-			if tlist, ok := innerSel["targetList"].([]any); ok {
-				for _, t := range tlist {
-					rt := t.(map[string]any)["ResTarget"].(map[string]any)
-					key := targetOutputKey(rt)
-					val, _ := rt["val"].(map[string]any)
-
-					// ColumnRef
-					if colref, ok := val["ColumnRef"].(map[string]any); ok {
-						parts := extractFields(colref)
-						if len(parts) == 0 {
-							continue
-						}
-						if key == "" {
-							key = strings.Join(parts, ".")
-						}
-						if src, err := innerCtx.resolveColumn(parts); err == nil {
-							name := stripAliasPrefix(key)
-							c.der[alias][name] = src
-							c.dc[alias] = append(c.dc[alias], name)
-							c.dp[alias][name] = []string{src}
-						}
-						continue
-					}
-
-					// Expression
-					if sources := innerCtx.collectExprSources(val); len(sources) > 0 {
-						if key == "" {
-							key = renderExprKey(val)
-						}
-						name := stripAliasPrefix(key)
-						uniq := uniqueStrings(sources)
-						c.der[alias][name] = uniq[0] // legacy
-						c.dc[alias] = append(c.dc[alias], name)
-						c.dp[alias][name] = uniq
-					}
-				}
+			c.dc[alias] = append([]string{}, cols...)
+			for k, v := range prov {
+				c.dp[alias][k] = append([]string{}, v...)
 			}
 		}
 	}
 }
 
-// ----------------- STAR EXPANSION -----------------
+// ----------------- CTE derivation -----------------
 
+func (c *ctx) deriveCTEs(selectStmt map[string]any) {
+	with, ok := selectStmt["withClause"].(map[string]any)
+	if !ok {
+		return
+	}
+	ctes, ok := with["ctes"].([]any)
+	if !ok {
+		return
+	}
+	for _, it := range ctes {
+		cte := it.(map[string]any)["CommonTableExpr"].(map[string]any)
+		name := cte["ctename"].(string)
+		q, ok := cte["ctequery"].(map[string]any)
+		if !ok {
+			continue
+		}
+		inner, ok := q["SelectStmt"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		cols, prov := processSelect(inner, c.cat)
+		if _, ok := c.dp[name]; !ok {
+			c.dp[name] = map[string][]string{}
+		}
+		c.dc[name] = append([]string{}, cols...)
+		for k, v := range prov {
+			c.dp[name][k] = append([]string{}, v...)
+		}
+	}
+}
+
+// ----------------- STAR EXPANSION (top-level rendering) -----------------
+
+// expandBareStar handles SELECT * at the top-level rendering.
 func (c *ctx) expandBareStar(out map[string][]string) {
 	if len(c.scope) == 1 {
 		for alias, tbl := range c.scope {
@@ -291,44 +421,143 @@ func (c *ctx) expandBareStar(out map[string][]string) {
 	}
 }
 
-func (c *ctx) handleStar(out map[string][]string, colref map[string]any) bool {
-	if !isStar(colref) {
-		return false
-	}
-	parts := extractFields(colref)
-	if len(parts) != 1 { // only alias.* here; bare * handled by caller
-		return false
-	}
-
-	alias := parts[0]
-	// Derived alias
+// expandAliasStar handles SELECT alias.* at the top-level rendering.
+func (c *ctx) expandAliasStar(alias string, out map[string][]string) {
+	// Derived alias?
 	if cols := c.dc[alias]; len(cols) > 0 {
 		for _, col := range cols {
 			if srcs := c.dp[alias][col]; len(srcs) > 0 {
 				out[alias+"."+col] = append(out[alias+"."+col], srcs...)
 			}
 		}
-		return true
+		return
 	}
 
-	// Base alias
+	// Base alias?
 	if tbl, ok := c.scope[alias]; ok {
 		if cols, ok := c.cat.Columns(tbl); ok {
 			for _, col := range cols {
 				out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 			}
-			return true
+			return
 		}
+		// Try without schema
 		if i := strings.IndexByte(tbl, '.'); i >= 0 {
 			if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
 				for _, col := range cols {
 					out[alias+"."+col] = append(out[alias+"."+col], tbl+"."+col)
 				}
-				return true
+				return
 			}
 		}
 	}
-	return true // star consumed, even if nothing expanded
+	// If nothing to expand, we still consider it handled.
+}
+
+// ----------------- STAR EXPANSION for relation-level outputs (processSelect) -----------------
+
+// expandBareStarToRelation expands '*' into relation-exposed names (no alias prefixes).
+func (c *ctx) expandBareStarToRelation(outCols *[]string, outProv map[string][]string) {
+	if len(c.scope) == 1 {
+		for alias, tbl := range c.scope {
+			// Derived
+			if cols := c.dc[alias]; len(cols) > 0 {
+				for _, col := range cols {
+					srcs := c.dp[alias][col]
+					if len(srcs) == 0 {
+						continue
+					}
+					*outCols = append(*outCols, col)
+					outProv[col] = append([]string{}, srcs...)
+				}
+				return
+			}
+			// Base
+			if cols, ok := c.cat.Columns(tbl); ok {
+				for _, col := range cols {
+					*outCols = append(*outCols, col)
+					outProv[col] = []string{tbl + "." + col}
+				}
+				return
+			}
+			// Try without schema
+			if i := strings.IndexByte(tbl, '.'); i >= 0 {
+				if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+					for _, col := range cols {
+						*outCols = append(*outCols, col)
+						outProv[col] = []string{tbl + "." + col}
+					}
+					return
+				}
+			}
+		}
+		return
+	}
+
+	// Multiple FROM: we still expose bare names (best-effort; tests don’t rely on collisions here)
+	for alias, tbl := range c.scope {
+		if cols := c.dc[alias]; len(cols) > 0 {
+			for _, col := range cols {
+				srcs := c.dp[alias][col]
+				if len(srcs) == 0 {
+					continue
+				}
+				*outCols = append(*outCols, col)
+				outProv[col] = append([]string{}, srcs...)
+			}
+			continue
+		}
+		if cols, ok := c.cat.Columns(tbl); ok {
+			for _, col := range cols {
+				*outCols = append(*outCols, col)
+				outProv[col] = []string{tbl + "." + col}
+			}
+			continue
+		}
+		if i := strings.IndexByte(tbl, '.'); i >= 0 {
+			if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+				for _, col := range cols {
+					*outCols = append(*outCols, col)
+					outProv[col] = []string{tbl + "." + col}
+				}
+			}
+		}
+	}
+}
+
+// expandAliasStarToRelation expands 'alias.*' into relation-exposed names (no alias prefixes).
+func (c *ctx) expandAliasStarToRelation(alias string, outCols *[]string, outProv map[string][]string) {
+	// Derived alias?
+	if cols := c.dc[alias]; len(cols) > 0 {
+		for _, col := range cols {
+			if srcs := c.dp[alias][col]; len(srcs) > 0 {
+				*outCols = append(*outCols, col)
+				outProv[col] = append([]string{}, srcs...)
+			}
+		}
+		return
+	}
+
+	// Base alias?
+	if tbl, ok := c.scope[alias]; ok {
+		if cols, ok := c.cat.Columns(tbl); ok {
+			for _, col := range cols {
+				*outCols = append(*outCols, col)
+				outProv[col] = []string{tbl + "." + col}
+			}
+			return
+		}
+		// Try without schema
+		if i := strings.IndexByte(tbl, '.'); i >= 0 {
+			if cols, ok := c.cat.Columns(tbl[i+1:]); ok {
+				for _, col := range cols {
+					*outCols = append(*outCols, col)
+					outProv[col] = []string{tbl + "." + col}
+				}
+				return
+			}
+		}
+	}
 }
 
 // ----------------- RESOLUTION -----------------
@@ -340,25 +569,18 @@ func (c *ctx) resolveColumn(parts []string) (string, error) {
 
 		// Single FROM item: prefer derived provenance.
 		if len(c.scope) == 1 {
-			for alias, tbl := range c.scope {
+			for alias := range c.scope {
 				if dpm, ok := c.dp[alias]; ok {
 					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 						return srcs[0], nil
 					}
 				}
-				if dpm, ok := c.dp[tbl]; ok {
-					if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
-						return srcs[0], nil
-					}
-				}
-				if dsm, ok := c.der[alias]; ok {
-					if src, ok := dsm[col]; ok {
-						return src, nil
-					}
-				}
-				if dsm, ok := c.der[tbl]; ok {
-					if src, ok := dsm[col]; ok {
-						return src, nil
+				// also check by table/CTE name if alias maps to that
+				if tbl := c.scope[alias]; tbl != "" {
+					if dpm, ok := c.dp[tbl]; ok {
+						if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
+							return srcs[0], nil
+						}
 					}
 				}
 			}
@@ -391,19 +613,9 @@ func (c *ctx) resolveColumn(parts []string) (string, error) {
 					return srcs[0], nil
 				}
 			}
-			if dpm, ok := c.dp[tbl]; ok {
+			if dpm, ok := c.dp[tbl]; ok { // (CTE references by name)
 				if srcs, ok := dpm[col]; ok && len(srcs) > 0 {
 					return srcs[0], nil
-				}
-			}
-			if dsm, ok := c.der[alias]; ok {
-				if src, ok := dsm[col]; ok {
-					return src, nil
-				}
-			}
-			if dsm, ok := c.der[tbl]; ok {
-				if src, ok := dsm[col]; ok {
-					return src, nil
 				}
 			}
 			return tbl + "." + col, nil
@@ -416,13 +628,38 @@ func (c *ctx) resolveColumn(parts []string) (string, error) {
 	return tbl + "." + parts[len(parts)-1], nil
 }
 
+// Catalog-backed column existence check.
+func hasColumn(cat Catalog, tbl, col string) bool {
+	cols, ok := cat.Columns(tbl)
+	if !ok {
+		if i := strings.IndexByte(tbl, '.'); i >= 0 {
+			cols, ok = cat.Columns(tbl[i+1:])
+		}
+		if !ok {
+			return false
+		}
+	}
+	for _, c := range cols {
+		if c == col {
+			return true
+		}
+	}
+	return false
+}
+
 // ----------------- EXPRESSION HANDLING -----------------
 
+// collectExprSources performs a data-directed traversal:
+// - Special-cases ColumnRef (terminal we can resolve).
+// - Otherwise recursively visits every map/list field.
+// This way we naturally cover A_Expr, FuncCall, TypeCast, CoalesceExpr,
+// NullIf, CaseExpr, BoolExpr, SubLink, SQLValueFunction wrappers, etc.
 func (c *ctx) collectExprSources(node map[string]any) []string {
 	if node == nil {
 		return nil
 	}
-	// ColumnRef
+
+	// Terminal: ColumnRef
 	if colref, ok := node["ColumnRef"].(map[string]any); ok {
 		if parts := extractFields(colref); len(parts) > 0 {
 			if src, err := c.resolveColumn(parts); err == nil {
@@ -431,49 +668,22 @@ func (c *ctx) collectExprSources(node map[string]any) []string {
 		}
 		return nil
 	}
-	// FuncCall
-	if fn, ok := node["FuncCall"].(map[string]any); ok {
-		var out []string
-		if args, ok := fn["args"].([]any); ok {
-			for _, a := range args {
-				if m, ok := a.(map[string]any); ok {
+
+	// Generic recursive walk over all children (maps/lists).
+	var out []string
+	for _, v := range node {
+		switch vv := v.(type) {
+		case map[string]any:
+			out = append(out, c.collectExprSources(vv)...)
+		case []any:
+			for _, it := range vv {
+				if m, ok := it.(map[string]any); ok {
 					out = append(out, c.collectExprSources(m)...)
 				}
 			}
 		}
-		return out
 	}
-	// A_Expr
-	if ae, ok := node["A_Expr"].(map[string]any); ok {
-		var out []string
-		if l, ok := ae["lexpr"].(map[string]any); ok {
-			out = append(out, c.collectExprSources(l)...)
-		}
-		if r, ok := ae["rexpr"].(map[string]any); ok {
-			out = append(out, c.collectExprSources(r)...)
-		}
-		return out
-	}
-	// Generic containers (TypeCast/Coalesce/NullIf/CaseExpr ...)
-	for _, k := range []string{"TypeCast", "CoalesceExpr", "NullIf", "CaseExpr"} {
-		if sub, ok := node[k].(map[string]any); ok {
-			var out []string
-			for _, v := range sub {
-				switch vv := v.(type) {
-				case []any:
-					for _, it := range vv {
-						if m, ok := it.(map[string]any); ok {
-							out = append(out, c.collectExprSources(m)...)
-						}
-					}
-				case map[string]any:
-					out = append(out, c.collectExprSources(vv)...)
-				}
-			}
-			return out
-		}
-	}
-	return nil
+	return out
 }
 
 func renderExprKey(node map[string]any) string {
@@ -590,101 +800,4 @@ func uniqueStrings(xs []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func hasColumn(cat Catalog, tbl, col string) bool {
-	cols, ok := cat.Columns(tbl)
-	if !ok {
-		if i := strings.IndexByte(tbl, '.'); i >= 0 {
-			cols, ok = cat.Columns(tbl[i+1:])
-		}
-		if !ok {
-			return false
-		}
-	}
-	for _, c := range cols {
-		if c == col {
-			return true
-		}
-	}
-	return false
-}
-
-// ----------------- CTE DERIVATION -----------------
-
-func (c *ctx) deriveCTEs(selectStmt map[string]any) {
-	with, ok := selectStmt["withClause"].(map[string]any)
-	if !ok {
-		return
-	}
-	ctes, ok := with["ctes"].([]any)
-	if !ok {
-		return
-	}
-	for _, it := range ctes {
-		cte := it.(map[string]any)["CommonTableExpr"].(map[string]any)
-		name := cte["ctename"].(string)
-		q, ok := cte["ctequery"].(map[string]any)
-		if !ok {
-			continue
-		}
-		innerSel, ok := q["SelectStmt"].(map[string]any)
-		if !ok {
-			continue
-		}
-
-		innerCtx := &ctx{
-			cat:   c.cat,
-			scope: map[string]string{},
-			der:   derivedSchemas{},
-			dc:    derivedCols{},
-			dp:    derivedProv{},
-		}
-		if from, ok := innerSel["fromClause"].([]any); ok {
-			innerCtx.buildScope(from)
-		}
-
-		c.der[name] = map[string]string{}
-		if _, ok := c.dp[name]; !ok {
-			c.dp[name] = map[string][]string{}
-		}
-
-		if tlist, ok := innerSel["targetList"].([]any); ok {
-			for _, t := range tlist {
-				rt := t.(map[string]any)["ResTarget"].(map[string]any)
-				colKey := targetOutputKey(rt)
-				val, _ := rt["val"].(map[string]any)
-
-				// ColumnRef
-				if cr, ok := val["ColumnRef"].(map[string]any); ok {
-					parts := extractFields(cr)
-					if len(parts) == 0 {
-						continue
-					}
-					if colKey == "" {
-						colKey = strings.Join(parts, ".")
-					}
-					nameOut := stripAliasPrefix(colKey)
-					if src, err := innerCtx.resolveColumn(parts); err == nil {
-						c.der[name][nameOut] = src
-						c.dc[name] = append(c.dc[name], nameOut)
-						c.dp[name][nameOut] = []string{src}
-					}
-					continue
-				}
-
-				// Expression
-				if srcs := innerCtx.collectExprSources(val); len(srcs) > 0 {
-					u := uniqueStrings(srcs)
-					if colKey == "" {
-						colKey = renderExprKey(val)
-					}
-					nameOut := stripAliasPrefix(colKey)
-					c.der[name][nameOut] = u[0]
-					c.dc[name] = append(c.dc[name], nameOut)
-					c.dp[name][nameOut] = u
-				}
-			}
-		}
-	}
 }
