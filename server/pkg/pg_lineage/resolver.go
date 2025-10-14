@@ -9,10 +9,6 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 )
 
-type Catalog interface {
-	Columns(qualified string) ([]string, bool)
-}
-
 // ---- Derived outputs data ----
 
 // Ordered output column names for each derived relation (subselect/CTE).

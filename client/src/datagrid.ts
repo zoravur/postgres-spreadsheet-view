@@ -7,7 +7,12 @@ interface EditableGridProps<T extends Record<string, unknown>> {
   setEditing: (cell: { row: number; col: keyof any } | null) => void;
 }
 
-export function datagrid<T extends Record<string, unknown>>({
+interface EditableCell {
+  editHandle: string;
+  value: unknown;
+}
+
+export function datagrid<T extends Record<string, EditableCell>>({
   data,
   onEdit,
   editing,
@@ -82,7 +87,7 @@ export function datagrid<T extends Record<string, unknown>>({
       data.map((row, i) =>
         h(
           "tr",
-          columns.map((col) => makeCell(i, col, row[col]))
+          columns.map((col) => makeCell(i, col, row[col].value))
         )
       )
     ),

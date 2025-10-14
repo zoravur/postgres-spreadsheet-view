@@ -62,12 +62,43 @@ const view = (state: any) =>
       "Run"
     ),
     h(
+      "button#provenance",
+      {
+        on: {
+          click: async () => {
+            const res = await fetch("/api/provenance", {
+              method: "POST",
+              body: state.query,
+            });
+
+            // state.results = await res.json();
+            console.log("Provenance:", await res.json());
+            // console.log("results set");
+            rerender();
+          },
+        },
+      },
+      "Provenance"
+    ),
+    h(
       "pre#result",
       state.results
         ? datagrid({
             data: state.results,
-            onEdit: (i, key, val) => {
-              state.results[i][key] = val; // mutate or trigger signal
+            onEdit: async (i, key, val) => {
+              const res = await fetch("/api/edit", {
+                method: "POST",
+                body: JSON.stringify({
+                  editHandle: state.results[i][key].editHandle,
+                  column: key,
+                  value: val,
+                }),
+              });
+
+              console.log(res.json());
+
+              // state.results[i][key] =
+              // state.results[i][key] = val; // mutate or trigger signal
               rerender();
             },
             editing: state.editing,
