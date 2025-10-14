@@ -7,6 +7,9 @@ import {
   h,
 } from "snabbdom";
 import { datagrid } from "./datagrid";
+import { Store } from "./store";
+import { triggerModal } from "./triggerModal";
+import { fetchApi } from "./util/fetchApi";
 
 export const patch = init([
   // Init patch function with chosen modules
@@ -16,15 +19,73 @@ export const patch = init([
   eventListenersModule, // attaches event listeners
 ]);
 
-const state: {
-  query: string;
-  results: Object | null;
-  editing: { row: number; col: keyof any } | null;
-} = {
-  query: "SELECT * FROM actor LIMIT 5;",
+const initialState = {
+  query: "SELECT * FROM actor ORDER BY actor_id LIMIT 5;",
   results: null,
   editing: null,
+  loading: 0,
+  pendingEdits: 0,
 };
+
+const store = new Store(initialState);
+
+store.on("EVENT/#query/change", (state, action) => {
+  return { ...state, query: action.payload };
+});
+
+store.on(
+  "HTTP/api/query",
+  (state, _action) => {
+    return { ...state, loading: state.loading + 1 };
+  },
+  async (_action, state) => {
+    try {
+      const data = await fetchApi("/api/query", {
+        method: "POST",
+        body: state.query,
+        useJson: false,
+      });
+      store.dispatch({ type: "DATA/results", payload: data });
+    } catch (err: any) {
+      store.dispatch({ type: "HTTP/api/query/FAILURE", payload: err.message });
+    }
+    rerender();
+  }
+);
+
+store.on(
+  "HTTP/api/edit",
+  (state, _action) => {
+    return { ...state, pendingEdits: state.pendingEdits + 1 };
+  },
+  async (action, _state) => {
+    try {
+      const data = await fetchApi("/api/edit", {
+        method: "POST",
+        body: action.payload,
+      });
+      store.dispatch({ type: "HTTP/api/edit/SUCCESS", payload: data });
+    } catch (err: any) {
+      store.dispatch({ type: "HTTP/api/edit/FAILURE", payload: err.message });
+    }
+  }
+);
+
+store.on(/HTTP\/api\/edit\/(SUCCESS|FAILURE)/, (state, _action) => {
+  return { ...state, pendingEdits: state.pendingEdits - 1 };
+});
+
+store.on(/FAILURE/, null, (action, _state) => {
+  triggerModal(action.payload);
+});
+
+store.on("HTTP/api/query/FAILURE", (state, _action) => {
+  return { ...state, loading: state.loading - 1 };
+});
+
+store.on("DATA/results", (state, action) => {
+  return { ...state, results: action.payload, loading: state.loading - 1 };
+});
 
 const view = (state: any) =>
   h("div", {}, [
@@ -34,9 +95,11 @@ const view = (state: any) =>
         props: { rows: 5, cols: 60 },
         on: {
           change: (ev: Event) => {
-            console.log("event");
-            state.query = (ev.target as HTMLTextAreaElement).value;
-            console.log(state);
+            store.dispatch({
+              type: "EVENT/#query/change",
+              payload: (ev.target as HTMLTextAreaElement).value,
+            });
+
             rerender();
           },
         },
@@ -48,13 +111,8 @@ const view = (state: any) =>
       {
         on: {
           click: async () => {
-            const res = await fetch("/api/query", {
-              method: "POST",
-              body: state.query,
-            });
+            store.dispatch({ type: "HTTP/api/query", payload: null });
 
-            state.results = await res.json();
-            console.log("results set");
             rerender();
           },
         },
@@ -62,59 +120,36 @@ const view = (state: any) =>
       "Run"
     ),
     h(
-      "button#provenance",
-      {
-        on: {
-          click: async () => {
-            const res = await fetch("/api/provenance", {
-              method: "POST",
-              body: state.query,
-            });
-
-            // state.results = await res.json();
-            console.log("Provenance:", await res.json());
-            // console.log("results set");
-            rerender();
-          },
-        },
-      },
-      "Provenance"
-    ),
-    h(
       "pre#result",
-      state.results
-        ? datagrid({
-            data: state.results,
-            onEdit: async (i, key, val) => {
-              const res = await fetch("/api/edit", {
-                method: "POST",
-                body: JSON.stringify({
-                  editHandle: state.results[i][key].editHandle,
-                  column: key,
-                  value: val,
-                }),
-              });
-
-              console.log(res.json());
-
-              // state.results[i][key] =
-              // state.results[i][key] = val; // mutate or trigger signal
-              rerender();
+      datagrid({
+        data: state.results,
+        loading: state.loading !== 0,
+        onEdit: async (i, key, val) => {
+          store.dispatch({
+            type: "HTTP/api/edit",
+            payload: {
+              editHandle: state.results[i][key].editHandle,
+              column: key,
+              value: val,
             },
-            editing: state.editing,
-            setEditing: (cell: { row: number; col: keyof any } | null) => {
-              state.editing = cell;
-              rerender();
-            },
-          })
-        : "(empty)"
+          });
+
+          // state.results[i][key] =
+          // state.results[i][key] = val; // mutate or trigger signal
+          rerender();
+        },
+        editing: state.editing,
+        setEditing: (cell: { row: number; col: keyof any } | null) => {
+          state.editing = cell;
+          rerender();
+        },
+      })
     ),
   ]);
 
 const container = document.getElementById("app")!;
-let vnode = patch(container, view(state));
+let vnode = patch(container, view(store.state));
 
 function rerender() {
-  console.log(state);
-  vnode = patch(vnode, view(state));
+  vnode = patch(vnode, view(store.state));
 }

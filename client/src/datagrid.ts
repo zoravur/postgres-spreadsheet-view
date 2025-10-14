@@ -2,6 +2,7 @@ import { h, type VNode } from "snabbdom";
 
 interface EditableGridProps<T extends Record<string, unknown>> {
   data: T[];
+  loading: boolean;
   onEdit?: (rowIndex: number, key: keyof T, value: string) => void;
   editing: { row: number; col: keyof any } | null;
   setEditing: (cell: { row: number; col: keyof any } | null) => void;
@@ -14,11 +15,15 @@ interface EditableCell {
 
 export function datagrid<T extends Record<string, EditableCell>>({
   data,
+  loading,
   onEdit,
   editing,
   setEditing,
 }: EditableGridProps<T>): VNode {
-  if (data.length === 0) return h("table");
+  if (!data || data.length === 0) return h("div", "(empty)");
+  if (loading) {
+    return h("div", "(loading...)");
+  }
 
   const columns = Object.keys(data[0]) as (keyof T)[];
   const numericCols = new Set(

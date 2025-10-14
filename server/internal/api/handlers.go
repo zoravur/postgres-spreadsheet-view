@@ -55,7 +55,11 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	prov, err := pg_lineage.ResolveProvenance(sqlQuery, cat)
 	if err != nil {
-		http.Error(w, "provenance resolution failed: "+err.Error(), http.StatusBadRequest)
+		if strings.Contains(err.Error(), "parse error") {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "provenance resolution failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
