@@ -11,14 +11,22 @@ export class Store<State> {
   state: State;
   reducers: [RegExp, Reducer<State>][];
   effectHandlers: [RegExp, EffectHandler<State>][];
+  subscribers: ((state: State, action: Action, prevState: State) => void)[];
 
   constructor(state: State) {
     this.state = state;
     this.reducers = [];
     this.effectHandlers = [];
+    this.subscribers = [];
+  }
+
+  subscribe(fn: (state: State, action: Action, prevState: State) => void) {
+    this.subscribers.push(fn);
+    return () => (this.subscribers = this.subscribers.filter((f) => f !== fn));
   }
 
   dispatch(action: Action) {
+    let prev = this.state;
     // console.log("BEFORE STATE:", this.state);
 
     // console.log("ACTION:", action);
@@ -27,6 +35,10 @@ export class Store<State> {
       if (pat.test(action.type)) {
         this.state = red(this.state, action);
       }
+    }
+
+    if (this.state !== prev) {
+      for (const fn of this.subscribers) fn(this.state, action, prev);
     }
 
     // console.log("AFTER STATE:", this.state);

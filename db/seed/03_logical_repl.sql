@@ -1,0 +1,1 @@
+SELECT * FROM pg_create_logical_replication_slot('delta_slot', 'wal2json');

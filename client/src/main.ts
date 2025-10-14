@@ -8,8 +8,9 @@ import {
 } from "snabbdom";
 import { datagrid } from "./datagrid";
 import { Store } from "./store";
-import { triggerModal } from "./triggerModal";
+// import { triggerModal } from "./triggerModal";
 import { fetchApi } from "./util/fetchApi";
+import Swal from "sweetalert2";
 
 export const patch = init([
   // Init patch function with chosen modules
@@ -49,7 +50,7 @@ store.on(
     } catch (err: any) {
       store.dispatch({ type: "HTTP/api/query/FAILURE", payload: err.message });
     }
-    rerender();
+    // rerender();
   }
 );
 
@@ -76,7 +77,8 @@ store.on(/HTTP\/api\/edit\/(SUCCESS|FAILURE)/, (state, _action) => {
 });
 
 store.on(/FAILURE/, null, (action, _state) => {
-  triggerModal(action.payload);
+  Swal.fire("Failure", `<pre>${action.payload}</pre>`, "error");
+  // triggerModal(action.payload);
 });
 
 store.on("HTTP/api/query/FAILURE", (state, _action) => {
@@ -85,6 +87,14 @@ store.on("HTTP/api/query/FAILURE", (state, _action) => {
 
 store.on("DATA/results", (state, action) => {
   return { ...state, results: action.payload, loading: state.loading - 1 };
+});
+
+store.on("UI/edit", (state, action) => {
+  return { ...state, editing: action.payload };
+});
+
+store.subscribe((state: typeof initialState, _action: any, _prev: any) => {
+  vnode = patch(vnode, view(state));
 });
 
 const view = (state: any) =>
@@ -100,7 +110,7 @@ const view = (state: any) =>
               payload: (ev.target as HTMLTextAreaElement).value,
             });
 
-            rerender();
+            // rerender();
           },
         },
       },
@@ -113,7 +123,7 @@ const view = (state: any) =>
           click: async () => {
             store.dispatch({ type: "HTTP/api/query", payload: null });
 
-            rerender();
+            // rerender();
           },
         },
       },
@@ -136,12 +146,13 @@ const view = (state: any) =>
 
           // state.results[i][key] =
           // state.results[i][key] = val; // mutate or trigger signal
-          rerender();
+          // rerender();
         },
         editing: state.editing,
         setEditing: (cell: { row: number; col: keyof any } | null) => {
-          state.editing = cell;
-          rerender();
+          store.dispatch({ type: "UI/edit", payload: cell });
+          // state.editing = cell;
+          // rerender();
         },
       })
     ),
@@ -150,6 +161,6 @@ const view = (state: any) =>
 const container = document.getElementById("app")!;
 let vnode = patch(container, view(store.state));
 
-function rerender() {
-  vnode = patch(vnode, view(store.state));
-}
+// function rerender() {
+//   vnode = patch(vnode, view(store.state));
+// }
