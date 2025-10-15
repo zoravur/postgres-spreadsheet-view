@@ -1,6 +1,7 @@
 [
   {
     "id": "S1_simple_select",
+    "description": "Basic SELECT with alias; injects primary key from single table.",
     "query": "SELECT a.name FROM actor a",
     "primary_keys": { "public.actor": ["id"] },
     "expected_sql": "SELECT a.name, a.id AS _pk_a_id FROM actor a",
@@ -8,6 +9,7 @@
   },
   {
     "id": "S2_join_aliases",
+    "description": "JOIN between two aliased tables; both should receive PK injections.",
     "query": "SELECT a.first_name, f.title FROM actor a JOIN film f ON f.actor_id = a.id",
     "primary_keys": {
       "public.actor": ["id"],
@@ -18,6 +20,7 @@
   },
   {
     "id": "S3_subquery_in_from",
+    "description": "Injects PKs into a subquery used as a derived table in FROM clause.",
     "query": "SELECT sq.title FROM (SELECT f.title, f.revenue FROM film f) sq",
     "primary_keys": { "public.film": ["id"] },
     "expected_sql": "SELECT sq.title FROM (SELECT f.title, f.revenue, f.id AS _pk_f_id FROM film f) sq",
@@ -25,13 +28,15 @@
   },
   {
     "id": "S4_nested_subquery_in_select",
+    "description": "Injects PKs into subquery inside SELECT projection.",
     "query": "SELECT (SELECT name FROM actor a2 WHERE a2.id = a.id) AS actor_name FROM actor a",
     "primary_keys": { "public.actor": ["id"] },
-    "expected_sql": "SELECT (SELECT name, id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id) AS actor_name, a.id AS _pk_a_id FROM actor a",
+    "expected_sql": "SELECT (SELECT name, a2.id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id) AS actor_name, a.id AS _pk_a_id FROM actor a",
     "expected_adds": { "a": ["_pk_a_id"], "a2": ["_pk_a2_id"] }
   },
   {
     "id": "S5_cte",
+    "description": "Handles CTE definition; injects PKs inside CTE subquery only.",
     "query": "WITH t AS (SELECT f.title FROM film f) SELECT * FROM t",
     "primary_keys": { "public.film": ["id"] },
     "expected_sql": "WITH t AS (SELECT f.title, f.id AS _pk_f_id FROM film f) SELECT * FROM t",
@@ -39,6 +44,7 @@
   },
   {
     "id": "S6_duplicate_aliases",
+    "description": "Same table joined twice under different aliases; both get distinct PKs.",
     "query": "SELECT a1.name, a2.name FROM actor a1 JOIN actor a2 ON a1.id <> a2.id",
     "primary_keys": { "public.actor": ["id"] },
     "expected_sql": "SELECT a1.name, a2.name, a1.id AS _pk_a1_id, a2.id AS _pk_a2_id FROM actor a1 JOIN actor a2 ON a1.id <> a2.id",
@@ -46,6 +52,7 @@
   },
   {
     "id": "S7_schema_qualified",
+    "description": "Schema-qualified table name should still map correctly to catalog PKs.",
     "query": "SELECT p.title FROM public.film p",
     "primary_keys": { "public.film": ["id"] },
     "expected_sql": "SELECT p.title, p.id AS _pk_p_id FROM public.film p",
@@ -53,13 +60,15 @@
   },
   {
     "id": "S8_group_by",
-    "query": "SELECT a.first_name, COUNT(*) FROM actor a GROUP BY a.first_name",
+    "description": "Adds PKs to both projection and GROUP BY clause for regroupability.",
+    "query": "SELECT a.first_name, count(*) FROM actor a GROUP BY a.first_name",
     "primary_keys": { "public.actor": ["id"] },
-    "expected_sql": "SELECT a.first_name, COUNT(*), a.id AS _pk_a_id FROM actor a GROUP BY a.first_name",
+    "expected_sql": "SELECT a.first_name, count(*), a.id AS _pk_a_id FROM actor a GROUP BY a.first_name, a.id",
     "expected_adds": { "a": ["_pk_a_id"] }
   },
   {
     "id": "S9_distinct",
+    "description": "PK injection should work even with DISTINCT projection.",
     "query": "SELECT DISTINCT a.first_name FROM actor a",
     "primary_keys": { "public.actor": ["id"] },
     "expected_sql": "SELECT DISTINCT a.first_name, a.id AS _pk_a_id FROM actor a",
@@ -67,6 +76,7 @@
   },
   {
     "id": "S10_no_from",
+    "description": "SELECT without FROM clause; no PK injection should occur.",
     "query": "SELECT 1 + 1 AS two",
     "primary_keys": { "public.actor": ["id"] },
     "expected_sql": "SELECT 1 + 1 AS two",
@@ -74,6 +84,7 @@
   },
   {
     "id": "S11_cte_with_join_inside",
+    "description": "CTE that itself contains a join; injects PKs inside inner join.",
     "query": "WITH j AS (SELECT a.name, f.title FROM actor a JOIN film f ON f.actor_id = a.id) SELECT * FROM j",
     "primary_keys": {
       "public.actor": ["id"],
@@ -84,6 +95,7 @@
   },
   {
     "id": "S12_star_expansion",
+    "description": "Ensures SELECT * expands correctly and PK is added afterward.",
     "query": "SELECT * FROM actor a",
     "primary_keys": { "public.actor": ["id"] },
     "expected_sql": "SELECT *, a.id AS _pk_a_id FROM actor a",
@@ -91,6 +103,7 @@
   },
   {
     "id": "S13_multiple_pk_columns",
+    "description": "Tables with composite primary keys should inject all key columns.",
     "query": "SELECT f.title FROM film f",
     "primary_keys": { "public.film": ["id", "actor_id"] },
     "expected_sql": "SELECT f.title, f.id AS _pk_f_id, f.actor_id AS _pk_f_actor_id FROM film f",
@@ -98,6 +111,7 @@
   },
   {
     "id": "S14_missing_catalog_entry",
+    "description": "Tables not found in catalog should be left unchanged.",
     "query": "SELECT x.name FROM ghost x",
     "primary_keys": {},
     "expected_sql": "SELECT x.name FROM ghost x",
@@ -105,9 +119,109 @@
   },
   {
     "id": "S15_shadowed_alias",
+    "description": "Handles nested alias reuse; inner alias shouldn’t shadow outer resolution.",
     "query": "SELECT outer_q.name FROM (SELECT name FROM actor outer_q) outer_q",
     "primary_keys": { "public.actor": ["id"] },
-    "expected_sql": "SELECT outer_q.name FROM (SELECT name, id AS _pk_outer_q_id FROM actor outer_q) outer_q",
+    "expected_sql": "SELECT outer_q.name FROM (SELECT name, outer_q.id AS _pk_outer_q_id FROM actor outer_q) outer_q",
     "expected_adds": { "outer_q": ["_pk_outer_q_id"] }
+  },
+  {
+    "id": "S16_aggregate_subquery_in_select",
+    "description": "Nested scalar subquery with aggregate; both outer and inner PKs injected.",
+    "query": "SELECT a.name, (SELECT max(f.revenue) FROM film f WHERE f.actor_id = a.id) AS top_revenue FROM actor a",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "SELECT a.name, (SELECT max(f.revenue), f.id AS _pk_f_id FROM film f WHERE f.actor_id = a.id) AS top_revenue, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S17_nested_cte_chain",
+    "description": "Multiple chained CTEs referencing each other; injection happens per CTE.",
+    "query": "WITH x AS (SELECT f.title FROM film f), y AS (SELECT x.title, a.name FROM x JOIN actor a ON a.id = 1) SELECT * FROM y",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "WITH x AS (SELECT f.title, f.id AS _pk_f_id FROM film f), y AS (SELECT x.title, a.name, a.id AS _pk_a_id FROM x JOIN actor a ON a.id = 1) SELECT * FROM y",
+    "expected_adds": { "f": ["_pk_f_id"], "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S18_subquery_in_from_with_aggregation",
+    "description": "Handles FROM-subquery with GROUP BY; PK added and included in group clause.",
+    "query": "SELECT s.avg_rev FROM (SELECT actor_id, avg(revenue) AS avg_rev FROM film GROUP BY actor_id) s",
+    "primary_keys": { "public.film": ["id"] },
+    "expected_sql": "SELECT s.avg_rev FROM (SELECT actor_id, avg(revenue) AS avg_rev, id AS _pk_film_id FROM film GROUP BY actor_id, id) s",
+    "expected_adds": { "film": ["_pk_film_id"] }
+  },
+  {
+    "id": "S19_subquery_in_case_expression",
+    "description": "Tests recursion into CASE WHEN clauses containing subqueries.",
+    "query": "SELECT CASE WHEN (SELECT count(*) FROM film f WHERE f.actor_id = a.id) > 5 THEN 'star' ELSE 'extra' END AS role_type FROM actor a",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "SELECT CASE WHEN (SELECT count(*), f.id AS _pk_f_id FROM film f WHERE f.actor_id = a.id) > 5 THEN 'star' ELSE 'extra' END AS role_type, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S20_function_call_with_subquery_arg",
+    "description": "Subquery used as argument in a function call (coalesce).",
+    "query": "SELECT coalesce((SELECT name FROM actor a2 WHERE a2.id = a.id), 'unknown') FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT coalesce((SELECT name, a2.id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id), 'unknown'), a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"], "a2": ["_pk_a2_id"] }
+  },
+  {
+    "id": "S21_window_function_partition_by",
+    "description": "Ensures PKs still injected alongside window functions.",
+    "query": "SELECT a.name, rank() OVER (PARTITION BY a.first_name ORDER BY a.last_name) AS r FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT a.name, rank() OVER (PARTITION BY a.first_name ORDER BY a.last_name) AS r, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S22_complex_join_tree",
+    "description": "Multi-join including subselects in FROM; ensures deep recursion correctness.",
+    "query": "SELECT a.first_name, c.name FROM actor a JOIN (SELECT f.actor_id, cat.name FROM film f JOIN category cat ON cat.id = f.category_id) c ON a.id = c.actor_id",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"],
+      "public.category": ["id"]
+    },
+    "expected_sql": "SELECT a.first_name, c.name, a.id AS _pk_a_id FROM actor a JOIN (SELECT f.actor_id, cat.name, f.id AS _pk_f_id, cat.id AS _pk_cat_id FROM film f JOIN category cat ON cat.id = f.category_id) c ON a.id = c.actor_id",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"], "cat": ["_pk_cat_id"] }
+  },
+  {
+    "id": "S23_exists_subquery",
+    "description": "Ensures subqueries in EXISTS clauses are traversed for PK injection.",
+    "query": "SELECT a.name FROM actor a WHERE EXISTS (SELECT 1 FROM film f WHERE f.actor_id = a.id)",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "SELECT a.name, a.id AS _pk_a_id FROM actor a WHERE EXISTS (SELECT 1, f.id AS _pk_f_id FROM film f WHERE f.actor_id = a.id)",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S24_lateral_join",
+    "description": "LATERAL subquery in FROM; ensures lateral RangeSubselect handled correctly.",
+    "query": "SELECT a.name, x.total FROM actor a, LATERAL (SELECT count(*) AS total FROM film f WHERE f.actor_id = a.id) x",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "SELECT a.name, x.total, a.id AS _pk_a_id FROM actor a, LATERAL (SELECT count(*), f.id AS _pk_f_id AS total FROM film f WHERE f.actor_id = a.id) x",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S25_distinct_on",
+    "description": "DISTINCT ON clause with ORDER BY; verifies clause order is preserved.",
+    "query": "SELECT DISTINCT ON (a.first_name) a.first_name, a.last_name FROM actor a ORDER BY a.first_name, a.last_name",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT DISTINCT ON (a.first_name) a.first_name, a.last_name, a.id AS _pk_a_id FROM actor a ORDER BY a.first_name, a.last_name",
+    "expected_adds": { "a": ["_pk_a_id"] }
   }
 ]
