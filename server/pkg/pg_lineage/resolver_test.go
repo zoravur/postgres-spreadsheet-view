@@ -28,12 +28,14 @@ type DemoCatalog struct{ cols map[string][]string }
 
 func (d *DemoCatalog) Columns(q string) ([]string, bool) { v, ok := d.cols[q]; return v, ok }
 
+func (d *DemoCatalog) PrimaryKeys(q string) ([]string, bool) { return []string{"id"}, true }
+
 var testCatalog = &DemoCatalog{cols: demoCols}
 
 func loadTestCases(t *testing.T) []ProvenanceCase {
 	t.Helper()
 
-	path := filepath.Join("testdata", "test_cases.json")
+	path := filepath.Join("testdata", "resolver_test_cases.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("failed to read testdata: %v", err)

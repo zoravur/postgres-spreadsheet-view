@@ -51,7 +51,6 @@ store.on(
     } catch (err: any) {
       store.dispatch({ type: "HTTP/api/query/FAILURE", payload: err.message });
     }
-    // rerender();
   }
 );
 
@@ -99,6 +98,7 @@ store.on("SOCKET/api/data", null, (action, _state) => {
 });
 
 store.subscribe((state: typeof initialState, _action: any, _prev: any) => {
+  console.log(state);
   vnode = patch(vnode, view(state));
 });
 
@@ -114,8 +114,6 @@ const view = (state: any) =>
               type: "EVENT/#query/change",
               payload: (ev.target as HTMLTextAreaElement).value,
             });
-
-            // rerender();
           },
         },
       },
@@ -127,8 +125,6 @@ const view = (state: any) =>
         on: {
           click: async () => {
             store.dispatch({ type: "HTTP/api/query", payload: null });
-
-            // rerender();
           },
         },
       },
@@ -148,16 +144,10 @@ const view = (state: any) =>
               value: val,
             },
           });
-
-          // state.results[i][key] =
-          // state.results[i][key] = val; // mutate or trigger signal
-          // rerender();
         },
         editing: state.editing,
         setEditing: (cell: { row: number; col: keyof any } | null) => {
           store.dispatch({ type: "UI/edit", payload: cell });
-          // state.editing = cell;
-          // rerender();
         },
       })
     ),

@@ -12,6 +12,7 @@ import (
 // Catalog interface (from resolver.go)
 type Catalog interface {
 	Columns(qualified string) ([]string, bool)
+	PrimaryKeys(table string) ([]string, bool)
 }
 
 // DBSchemaCatalog implements Catalog using information_schema data.

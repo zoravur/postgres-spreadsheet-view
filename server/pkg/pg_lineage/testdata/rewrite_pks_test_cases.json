@@ -1,0 +1,113 @@
+[
+  {
+    "id": "S1_simple_select",
+    "query": "SELECT a.name FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT a.name, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S2_join_aliases",
+    "query": "SELECT a.first_name, f.title FROM actor a JOIN film f ON f.actor_id = a.id",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "SELECT a.first_name, f.title, a.id AS _pk_a_id, f.id AS _pk_f_id FROM actor a JOIN film f ON f.actor_id = a.id",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S3_subquery_in_from",
+    "query": "SELECT sq.title FROM (SELECT f.title, f.revenue FROM film f) sq",
+    "primary_keys": { "public.film": ["id"] },
+    "expected_sql": "SELECT sq.title FROM (SELECT f.title, f.revenue, f.id AS _pk_f_id FROM film f) sq",
+    "expected_adds": { "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S4_nested_subquery_in_select",
+    "query": "SELECT (SELECT name FROM actor a2 WHERE a2.id = a.id) AS actor_name FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT (SELECT name, id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id) AS actor_name, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"], "a2": ["_pk_a2_id"] }
+  },
+  {
+    "id": "S5_cte",
+    "query": "WITH t AS (SELECT f.title FROM film f) SELECT * FROM t",
+    "primary_keys": { "public.film": ["id"] },
+    "expected_sql": "WITH t AS (SELECT f.title, f.id AS _pk_f_id FROM film f) SELECT * FROM t",
+    "expected_adds": { "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S6_duplicate_aliases",
+    "query": "SELECT a1.name, a2.name FROM actor a1 JOIN actor a2 ON a1.id <> a2.id",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT a1.name, a2.name, a1.id AS _pk_a1_id, a2.id AS _pk_a2_id FROM actor a1 JOIN actor a2 ON a1.id <> a2.id",
+    "expected_adds": { "a1": ["_pk_a1_id"], "a2": ["_pk_a2_id"] }
+  },
+  {
+    "id": "S7_schema_qualified",
+    "query": "SELECT p.title FROM public.film p",
+    "primary_keys": { "public.film": ["id"] },
+    "expected_sql": "SELECT p.title, p.id AS _pk_p_id FROM public.film p",
+    "expected_adds": { "p": ["_pk_p_id"] }
+  },
+  {
+    "id": "S8_group_by",
+    "query": "SELECT a.first_name, COUNT(*) FROM actor a GROUP BY a.first_name",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT a.first_name, COUNT(*), a.id AS _pk_a_id FROM actor a GROUP BY a.first_name",
+    "expected_adds": { "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S9_distinct",
+    "query": "SELECT DISTINCT a.first_name FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT DISTINCT a.first_name, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S10_no_from",
+    "query": "SELECT 1 + 1 AS two",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT 1 + 1 AS two",
+    "expected_adds": {}
+  },
+  {
+    "id": "S11_cte_with_join_inside",
+    "query": "WITH j AS (SELECT a.name, f.title FROM actor a JOIN film f ON f.actor_id = a.id) SELECT * FROM j",
+    "primary_keys": {
+      "public.actor": ["id"],
+      "public.film": ["id"]
+    },
+    "expected_sql": "WITH j AS (SELECT a.name, f.title, a.id AS _pk_a_id, f.id AS _pk_f_id FROM actor a JOIN film f ON f.actor_id = a.id) SELECT * FROM j",
+    "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
+  },
+  {
+    "id": "S12_star_expansion",
+    "query": "SELECT * FROM actor a",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT *, a.id AS _pk_a_id FROM actor a",
+    "expected_adds": { "a": ["_pk_a_id"] }
+  },
+  {
+    "id": "S13_multiple_pk_columns",
+    "query": "SELECT f.title FROM film f",
+    "primary_keys": { "public.film": ["id", "actor_id"] },
+    "expected_sql": "SELECT f.title, f.id AS _pk_f_id, f.actor_id AS _pk_f_actor_id FROM film f",
+    "expected_adds": { "f": ["_pk_f_id", "_pk_f_actor_id"] }
+  },
+  {
+    "id": "S14_missing_catalog_entry",
+    "query": "SELECT x.name FROM ghost x",
+    "primary_keys": {},
+    "expected_sql": "SELECT x.name FROM ghost x",
+    "expected_adds": {}
+  },
+  {
+    "id": "S15_shadowed_alias",
+    "query": "SELECT outer_q.name FROM (SELECT name FROM actor outer_q) outer_q",
+    "primary_keys": { "public.actor": ["id"] },
+    "expected_sql": "SELECT outer_q.name FROM (SELECT name, id AS _pk_outer_q_id FROM actor outer_q) outer_q",
+    "expected_adds": { "outer_q": ["_pk_outer_q_id"] }
+  }
+]
