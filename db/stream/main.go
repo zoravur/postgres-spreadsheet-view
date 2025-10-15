@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -16,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// Broadcaster manages a set of listeners and broadcasts messages to them.
+// ... (Broadcaster struct and its methods remain the same) ...
 type Broadcaster struct {
 	mu        sync.Mutex
 	listeners map[chan []byte]struct{}
@@ -28,7 +27,6 @@ func NewBroadcaster() *Broadcaster {
 	}
 }
 
-// AddListener registers a new channel to receive broadcasts.
 func (b *Broadcaster) AddListener(listener chan []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -36,7 +34,6 @@ func (b *Broadcaster) AddListener(listener chan []byte) {
 	log.Printf("New listener added. Total listeners: %d", len(b.listeners))
 }
 
-// RemoveListener unregisters a channel.
 func (b *Broadcaster) RemoveListener(listener chan []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -44,21 +41,13 @@ func (b *Broadcaster) RemoveListener(listener chan []byte) {
 	log.Printf("Listener removed. Total listeners: %d", len(b.listeners))
 }
 
-// Broadcast sends a message to all registered listeners.
 func (b *Broadcaster) Broadcast(msg []byte) {
-	fmt.Println("Broadcasting message: " + string(msg))
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	// You can add this log line for debugging if you want, but the non-blocking select is critical.
-	// log.Println("Broadcasting message to", len(b.listeners), "listeners")
-
 	for listener := range b.listeners {
-		// Use a non-blocking send to prevent a slow client from blocking the broadcaster.
 		select {
 		case listener <- msg:
 		default:
-			// Client's channel is full, they are too slow. We can log this or just drop the message.
 			log.Printf("Listener channel full, dropping message for one client.")
 		}
 	}
@@ -66,15 +55,10 @@ func (b *Broadcaster) Broadcast(msg []byte) {
 
 func main() {
 	broadcaster := NewBroadcaster()
-
-	// Start the main replication reader in the background. It will run forever.
 	go mainReplicationReader(broadcaster)
-
-	// Start the TCP server to accept client connections.
 	startTCPServer(broadcaster)
 }
 
-// mainReplicationReader is the SINGLE, permanent goroutine that reads from PostgreSQL.
 func mainReplicationReader(b *Broadcaster) {
 	for {
 		err := connectAndReadReplication(b)
@@ -115,34 +99,34 @@ func connectAndReadReplication(b *Broadcaster) error {
 	}
 	log.Printf("Logical replication started on slot %s", slotName)
 
-	var lastLSN pglogrepl.LSN
 	standbyMessageTimeout := time.Second * 10
 	nextStandbyMessageDeadline := time.Now().Add(standbyMessageTimeout)
 
 	for {
-		if time.Now().After(nextStandbyMessageDeadline) && lastLSN != 0 {
-			err = pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN})
-			if err != nil {
-				log.Println("SendStandbyStatusUpdate failed:", err)
-				return err // Return error to trigger reconnect
-			}
-			log.Printf("Sent Standby status message at LSN %s\n", lastLSN)
-			nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
-		}
-
+		// Use the deadline for receiving messages, ensuring we can send periodic keepalives.
 		ctx, cancel := context.WithDeadline(context.Background(), nextStandbyMessageDeadline)
 		rawMsg, err := conn.ReceiveMessage(ctx)
 		cancel()
 		if err != nil {
+			// If it's a timeout, it's our chance to send a periodic status update.
 			if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
-				continue
+				// We must send a status update to keep the connection alive.
+				// We'll use the latest LSN we've successfully processed.
+				err = pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: sys.XLogPos})
+				if err != nil {
+					log.Println("SendStandbyStatusUpdate failed on timeout:", err)
+					return err // A failure here is critical, so we reconnect.
+				}
+				log.Printf("Sent periodic Standby status message at LSN %s\n", sys.XLogPos)
+				nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout) // Reset the deadline.
+				continue                                                           // Go back to waiting for a message.
 			}
-			return err // Return any other error to trigger reconnect
+			return err // Any other error, we need to reconnect.
 		}
 
 		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
 			log.Printf("received Postgres WAL error: %+v", errMsg)
-			return errors.New(errMsg.Message) // Trigger reconnect
+			return errors.New(errMsg.Message)
 		}
 
 		msg, ok := rawMsg.(*pgproto3.CopyData)
@@ -159,7 +143,13 @@ func connectAndReadReplication(b *Broadcaster) error {
 				continue
 			}
 			if pkm.ReplyRequested {
-				nextStandbyMessageDeadline = time.Time{}
+				// Immediately send a status update if the server requests it.
+				err = pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: sys.XLogPos})
+				if err != nil {
+					log.Println("SendStandbyStatusUpdate failed on keepalive request:", err)
+					return err
+				}
+				log.Printf("Sent Standby status on keepalive request at LSN %s\n", sys.XLogPos)
 			}
 
 		case pglogrepl.XLogDataByteID:
@@ -169,23 +159,48 @@ func connectAndReadReplication(b *Broadcaster) error {
 				continue
 			}
 
-			// Parse LSN to send standby updates
+			// === START ENHANCED DEBUGGING AND IMMEDIATE ACK ===
+			log.Printf("Received wal2json data: %s", string(xld.WALData))
+
 			var eventData map[string]interface{}
-			if err := json.Unmarshal(xld.WALData, &eventData); err == nil {
-				if lsnStr, ok := eventData["lsn"].(string); ok {
-					if parsedLSN, err := pglogrepl.ParseLSN(lsnStr); err == nil {
-						lastLSN = parsedLSN
-					}
-				}
+			if err := json.Unmarshal(xld.WALData, &eventData); err != nil {
+				log.Printf("Failed to unmarshal wal2json payload: %v", err)
+				continue // Skip if not valid JSON
 			}
 
-			// Broadcast the raw WALData to all connected clients
+			// Broadcast the message to all clients FIRST.
 			b.Broadcast(xld.WALData)
+
+			lsnStr, ok := eventData["lsn"].(string)
+			if !ok {
+				log.Println("LSN not found in wal2json payload, skipping immediate ack.")
+				continue // This is expected for BEGIN/COMMIT messages.
+			}
+
+			parsedLSN, err := pglogrepl.ParseLSN(lsnStr)
+			if err != nil {
+				log.Printf("Failed to parse LSN '%s': %v", lsnStr, err)
+				continue
+			}
+
+			// Update our system LSN tracker
+			sys.XLogPos = parsedLSN
+			log.Printf("Successfully parsed LSN: %s", sys.XLogPos)
+
+			// ** CRITICAL **
+			// Immediately acknowledge the LSN we just processed.
+			err = pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: sys.XLogPos})
+			if err != nil {
+				log.Println("SendStandbyStatusUpdate failed immediately after processing:", err)
+				return err // This is a critical failure, reconnect.
+			}
+			log.Printf("Sent immediate Standby status for LSN %s", sys.XLogPos)
+			// === END ENHANCED DEBUGGING AND IMMEDIATE ACK ===
 		}
 	}
 }
 
-// startTCPServer listens for incoming client connections.
+// ... (startTCPServer and handleClient functions remain the same) ...
 func startTCPServer(b *Broadcaster) {
 	l, err := net.Listen("tcp", ":9000")
 	if err != nil {
@@ -200,28 +215,21 @@ func startTCPServer(b *Broadcaster) {
 			log.Println("accept:", err)
 			continue
 		}
-		// Each client gets its own goroutine.
 		go handleClient(client, b)
 	}
 }
 
-// handleClient manages a single client's lifecycle.
 func handleClient(c net.Conn, b *Broadcaster) {
 	defer c.Close()
 	log.Printf("client %v connected", c.RemoteAddr())
-
-	// Create a channel for this specific client.
-	// Buffer size of 100 to absorb some burstiness.
-	messages := make(chan []byte, 1)
+	messages := make(chan []byte, 100)
 	b.AddListener(messages)
 	defer b.RemoveListener(messages)
 
 	for msg := range messages {
-		// Write message to the client
 		if _, err := c.Write(append(msg, '\n')); err != nil {
-			// If we can't write, the client has probably disconnected.
 			log.Printf("client %v write error: %v. Disconnecting.", c.RemoteAddr(), err)
-			return // Exit the goroutine, which will trigger the defer.
+			return
 		}
 	}
 }
