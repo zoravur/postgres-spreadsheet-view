@@ -11,6 +11,7 @@ import { Store } from "./store";
 // import { triggerModal } from "./triggerModal";
 import { fetchApi } from "./util/fetchApi";
 import Swal from "sweetalert2";
+import { connectWS } from "./socket";
 
 export const patch = init([
   // Init patch function with chosen modules
@@ -93,6 +94,10 @@ store.on("UI/edit", (state, action) => {
   return { ...state, editing: action.payload };
 });
 
+store.on("SOCKET/api/data", null, (action, _state) => {
+  console.log("SOCKET MESSAGE: ", action.payload);
+});
+
 store.subscribe((state: typeof initialState, _action: any, _prev: any) => {
   vnode = patch(vnode, view(state));
 });
@@ -160,6 +165,13 @@ const view = (state: any) =>
 
 const container = document.getElementById("app")!;
 let vnode = patch(container, view(store.state));
+
+connectWS(
+  `ws://localhost:8080/api/ws`,
+  function (this: WebSocket, ev: MessageEvent<any>): any {
+    store.dispatch({ type: "SOCKET/api/data", payload: JSON.parse(ev.data) });
+  }
+);
 
 // function rerender() {
 //   vnode = patch(vnode, view(store.state));

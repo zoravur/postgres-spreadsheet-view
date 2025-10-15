@@ -1,8 +1,9 @@
 package app
 
 import (
-	"bufio"
 	"context"
+	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -36,22 +37,31 @@ func (s *Server) Run() error {
 		}
 	}()
 
-	// Start WAL listener in background
 	go func() {
 		api.InitBroadcaster()
+
 		conn, err := net.Dial("tcp", "localhost:9000")
 		if err != nil {
 			log.Fatal("Failed to connect to WAL stream:", err)
 		}
 		defer conn.Close()
 
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			api.Broadcast(line)
-		}
-		if err := scanner.Err(); err != nil {
-			log.Println("WAL stream error:", err)
+		dec := json.NewDecoder(conn)
+		for {
+			var msg any
+			if err := dec.Decode(&msg); err != nil {
+				if err == io.EOF {
+					break
+				}
+				log.Println("WAL decode error:", err)
+				continue
+			}
+			data, err := json.Marshal(msg)
+			if err != nil {
+				log.Println("marshal error:", err)
+				continue
+			}
+			api.Broadcast(data)
 		}
 	}()
 
