@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,6 +35,26 @@ func (s *Server) Run() error {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 	}()
+
+	// Start WAL listener in background
+	go func() {
+		api.InitBroadcaster()
+		conn, err := net.Dial("tcp", "localhost:9000")
+		if err != nil {
+			log.Fatal("Failed to connect to WAL stream:", err)
+		}
+		defer conn.Close()
+
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			api.Broadcast(line)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Println("WAL stream error:", err)
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
