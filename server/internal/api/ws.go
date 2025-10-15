@@ -4,6 +4,8 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/zoravur/postgres-spreadsheet-view/server/internal/protocol"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -11,45 +13,32 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-var clients = make(map[*websocket.Conn]bool)
-var broadcast = make(chan []byte)
+var registry = protocol.NewRegistry()
 
 func HandleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade error:", err)
+		log.Println("upgrade error:", err)
 		return
 	}
 	defer conn.Close()
 
-	clients[conn] = true
-	log.Println("Client connected")
-
 	for {
-		_, _, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			delete(clients, conn)
-			log.Println("Client disconnected")
+			log.Println("ws read error:", err)
 			break
 		}
+		protocol.HandleMessage(conn, msg, registry)
 	}
 }
 
-// in ws.go
-func InitBroadcaster() {
-	go func() {
-		for msg := range broadcast {
-			for client := range clients {
-				err := client.WriteMessage(websocket.TextMessage, msg)
-				if err != nil {
-					client.Close()
-					delete(clients, client)
-				}
-			}
-		}
-	}()
-}
-
-func Broadcast(msg []byte) { // <-- Exported
-	broadcast <- msg
+func BroadcastUpdate(table string, pk any, col string, val any) {
+	registry.Broadcast(protocol.Update{
+		Message: protocol.Message{Type: "UPDATE"},
+		Table:   table,
+		PK:      pk,
+		Col:     col,
+		Value:   val,
+	})
 }

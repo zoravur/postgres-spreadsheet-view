@@ -18,46 +18,83 @@ type Catalog interface {
 // DBSchemaCatalog implements Catalog using information_schema data.
 type DBSchemaCatalog struct {
 	tables map[string][]string // "schema.table" -> ordered column names
+	pkeys  map[string][]string // "schema.table" -> primary key columns
 }
 
 // NewCatalogFromDB loads the catalog from a live PostgreSQL connection.
 // Optionally filter to specific schemas (e.g., []string{"public"}).
 func NewCatalogFromDB(db *sql.DB, schemas []string) (*DBSchemaCatalog, error) {
-	query := `
+	cat := &DBSchemaCatalog{
+		tables: make(map[string][]string),
+		pkeys:  make(map[string][]string),
+	}
+
+	// --- Load columns ---
+	queryCols := `
 		SELECT table_schema, table_name, column_name
 		FROM information_schema.columns
 		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')`
-
 	if len(schemas) > 0 {
 		var qs []string
 		for _, s := range schemas {
 			qs = append(qs, fmt.Sprintf("'%s'", s))
 		}
-		query += " AND table_schema IN (" + strings.Join(qs, ", ") + ")"
+		queryCols += " AND table_schema IN (" + strings.Join(qs, ", ") + ")"
 	}
+	queryCols += " ORDER BY table_schema, table_name, ordinal_position;"
 
-	query += `
-		ORDER BY table_schema, table_name, ordinal_position;`
-
-	rows, err := db.Query(query)
+	rows, err := db.Query(queryCols)
 	if err != nil {
-		return nil, fmt.Errorf("query information_schema: %w", err)
+		return nil, fmt.Errorf("query columns: %w", err)
 	}
 	defer rows.Close()
-
-	cat := &DBSchemaCatalog{tables: make(map[string][]string)}
 
 	for rows.Next() {
 		var schema, tbl, col string
 		if err := rows.Scan(&schema, &tbl, &col); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
+			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		key := schema + "." + tbl
 		cat.tables[key] = append(cat.tables[key], col)
 	}
-
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration: %w", err)
+		return nil, fmt.Errorf("row iteration (columns): %w", err)
+	}
+
+	// --- Load primary keys ---
+	queryPK := `
+		SELECT kcu.table_schema, kcu.table_name, kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		  AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+		  AND kcu.table_schema NOT IN ('pg_catalog', 'information_schema')`
+	if len(schemas) > 0 {
+		var qs []string
+		for _, s := range schemas {
+			qs = append(qs, fmt.Sprintf("'%s'", s))
+		}
+		queryPK += " AND kcu.table_schema IN (" + strings.Join(qs, ", ") + ")"
+	}
+	queryPK += " ORDER BY kcu.table_schema, kcu.table_name, kcu.ordinal_position;"
+
+	pkRows, err := db.Query(queryPK)
+	if err != nil {
+		return nil, fmt.Errorf("query primary keys: %w", err)
+	}
+	defer pkRows.Close()
+
+	for pkRows.Next() {
+		var schema, tbl, col string
+		if err := pkRows.Scan(&schema, &tbl, &col); err != nil {
+			return nil, fmt.Errorf("scan pk: %w", err)
+		}
+		key := schema + "." + tbl
+		cat.pkeys[key] = append(cat.pkeys[key], col)
+	}
+	if err := pkRows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration (pkeys): %w", err)
 	}
 
 	return cat, nil
@@ -65,24 +102,37 @@ func NewCatalogFromDB(db *sql.DB, schemas []string) (*DBSchemaCatalog, error) {
 
 // Columns implements the Catalog interface.
 func (c *DBSchemaCatalog) Columns(qualified string) ([]string, bool) {
-	// Exact match
 	if cols, ok := c.tables[qualified]; ok {
 		return cols, true
 	}
-
-	// Fallback: unqualified table name
 	for k, v := range c.tables {
 		if strings.HasSuffix(k, "."+qualified) {
 			return v, true
 		}
 	}
+	return nil, false
+}
 
+// PrimaryKeys implements the Catalog interface.
+func (c *DBSchemaCatalog) PrimaryKeys(table string) ([]string, bool) {
+	if pks, ok := c.pkeys[table]; ok {
+		return pks, true
+	}
+	for k, v := range c.pkeys {
+		if strings.HasSuffix(k, "."+table) {
+			return v, true
+		}
+	}
 	return nil, false
 }
 
 // ExportJSON dumps the catalog to a file in JSON format.
 func (c *DBSchemaCatalog) ExportJSON(path string) error {
-	b, err := json.MarshalIndent(c.tables, "", "  ")
+	data := map[string]any{
+		"tables": c.tables,
+		"pkeys":  c.pkeys,
+	}
+	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
 	}
@@ -96,23 +146,26 @@ func LoadCatalogFromJSON(path string) (*DBSchemaCatalog, error) {
 		return nil, fmt.Errorf("read catalog json: %w", err)
 	}
 
-	var tables map[string][]string
-	if err := json.Unmarshal(b, &tables); err != nil {
+	var data struct {
+		Tables map[string][]string `json:"tables"`
+		PKeys  map[string][]string `json:"pkeys"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
 		return nil, fmt.Errorf("unmarshal catalog json: %w", err)
 	}
 
-	// Ensure deterministic column order for stable output
-	for _, cols := range tables {
+	for _, cols := range data.Tables {
+		sort.Strings(cols)
+	}
+	for _, cols := range data.PKeys {
 		sort.Strings(cols)
 	}
 
-	return &DBSchemaCatalog{tables: tables}, nil
+	return &DBSchemaCatalog{tables: data.Tables, pkeys: data.PKeys}, nil
 }
 
-// Size returns number of tables in the catalog.
 func (c *DBSchemaCatalog) Size() int { return len(c.tables) }
 
-// Tables returns a sorted list of all fully-qualified table names.
 func (c *DBSchemaCatalog) Tables() []string {
 	keys := make([]string, 0, len(c.tables))
 	for k := range c.tables {

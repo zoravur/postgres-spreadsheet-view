@@ -169,9 +169,9 @@
   {
     "id": "S20_function_call_with_subquery_arg",
     "description": "Subquery used as argument in a function call (coalesce).",
-    "query": "SELECT coalesce((SELECT name FROM actor a2 WHERE a2.id = a.id), 'unknown') FROM actor a",
+    "query": "SELECT COALESCE((SELECT name FROM actor a2 WHERE a2.id = a.id), 'unknown') FROM actor a",
     "primary_keys": { "public.actor": ["id"] },
-    "expected_sql": "SELECT coalesce((SELECT name, a2.id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id), 'unknown'), a.id AS _pk_a_id FROM actor a",
+    "expected_sql": "SELECT COALESCE((SELECT name, a2.id AS _pk_a2_id FROM actor a2 WHERE a2.id = a.id), 'unknown'), a.id AS _pk_a_id FROM actor a",
     "expected_adds": { "a": ["_pk_a_id"], "a2": ["_pk_a2_id"] }
   },
   {
@@ -191,7 +191,7 @@
       "public.film": ["id"],
       "public.category": ["id"]
     },
-    "expected_sql": "SELECT a.first_name, c.name, a.id AS _pk_a_id FROM actor a JOIN (SELECT f.actor_id, cat.name, f.id AS _pk_f_id, cat.id AS _pk_cat_id FROM film f JOIN category cat ON cat.id = f.category_id) c ON a.id = c.actor_id",
+    "expected_sql": "SELECT a.first_name, c.name, a.id AS _pk_a_id FROM actor a JOIN (SELECT f.actor_id, cat.name, cat.id AS _pk_cat_id, f.id AS _pk_f_id FROM film f JOIN category cat ON cat.id = f.category_id) c ON a.id = c.actor_id",
     "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"], "cat": ["_pk_cat_id"] }
   },
   {
@@ -213,7 +213,7 @@
       "public.actor": ["id"],
       "public.film": ["id"]
     },
-    "expected_sql": "SELECT a.name, x.total, a.id AS _pk_a_id FROM actor a, LATERAL (SELECT count(*), f.id AS _pk_f_id AS total FROM film f WHERE f.actor_id = a.id) x",
+    "expected_sql": "SELECT a.name, x.total, a.id AS _pk_a_id FROM actor a, LATERAL (SELECT count(*) AS total, f.id AS _pk_f_id FROM film f WHERE f.actor_id = a.id) x",
     "expected_adds": { "a": ["_pk_a_id"], "f": ["_pk_f_id"] }
   },
   {

@@ -14,12 +14,14 @@ func main() {
 	connStr := flag.String("conn", "postgres://user:pass@localhost:5432/mydb?sslmode=disable", "Postgres connection string")
 	query := flag.String("query", "", "SQL query to analyze")
 	dump := flag.String("dump", "", "Optional path to write catalog.json")
+	noRewrite := flag.Bool("no-rewrite", false, "Skip primary key injection rewrite step")
 	flag.Parse()
 
 	if *query == "" {
 		log.Fatal("Please provide a SQL query via --query")
 	}
 
+	// Connect
 	db, err := sql.Open("postgres", *connStr)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
@@ -40,8 +42,27 @@ func main() {
 		fmt.Printf("✓ Catalog exported to %s\n", *dump)
 	}
 
-	fmt.Printf("\n→ Analyzing query:\n%s\n\n", *query)
-	prov, err := pg_lineage.ResolveProvenance(*query, cat)
+	sqlToAnalyze := *query
+	if !*noRewrite {
+		fmt.Println("\n→ Rewriting query to inject PKs...")
+		rewritten, pkMap, err := pg_lineage.RewriteSelectInjectPKs(*query, cat)
+		if err != nil {
+			log.Fatalf("rewrite failed: %v", err)
+		}
+
+		fmt.Println("=== Rewritten SQL ===")
+		fmt.Println(rewritten)
+
+		fmt.Println("\n=== Primary Key Map ===")
+		for tbl, pks := range pkMap {
+			fmt.Printf("%s → %v\n", tbl, pks)
+		}
+
+		sqlToAnalyze = rewritten
+	}
+
+	fmt.Printf("\n→ Analyzing provenance for:\n%s\n\n", sqlToAnalyze)
+	prov, err := pg_lineage.ResolveProvenance(sqlToAnalyze, cat)
 	if err != nil {
 		log.Fatalf("resolve provenance: %v", err)
 	}

@@ -93,7 +93,7 @@ store.on("UI/edit", (state, action) => {
   return { ...state, editing: action.payload };
 });
 
-store.on("SOCKET/api/data", null, (action, _state) => {
+store.on("SOCKET/UPDATE", null, (action, _state) => {
   console.log("SOCKET MESSAGE: ", action.payload);
 });
 
@@ -156,12 +156,9 @@ const view = (state: any) =>
 const container = document.getElementById("app")!;
 let vnode = patch(container, view(store.state));
 
-connectWS(
-  `ws://localhost:8080/api/ws`,
-  function (this: WebSocket, ev: MessageEvent<any>): any {
-    store.dispatch({ type: "SOCKET/api/data", payload: JSON.parse(ev.data) });
-  }
-);
+connectWS(`ws://localhost:8080/api/ws`, (update: any) => {
+  store.dispatch({ type: "SOCKET/UPDATE", payload: update });
+});
 
 // function rerender() {
 //   vnode = patch(vnode, view(store.state));

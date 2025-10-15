@@ -38,7 +38,7 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	sqlQuery := string(body)
+	origSQL := string(body)
 
 	db, err := sql.Open("postgres", "postgres://postgres:pass@localhost:5432/postgres?sslmode=disable")
 	if err != nil {
@@ -47,13 +47,15 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	// Step 1: Resolve provenance
+	// Build catalog once.
 	cat, err := pg_lineage.NewCatalogFromDB(db, []string{"public"})
 	if err != nil {
 		http.Error(w, "catalog load failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	prov, err := pg_lineage.ResolveProvenance(sqlQuery, cat)
+
+	// Provenance for ORIGINAL columns (e.g. a.first_name -> actor.first_name).
+	provOrig, err := pg_lineage.ResolveProvenance(origSQL, cat)
 	if err != nil {
 		if strings.Contains(err.Error(), "parse error") {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -63,41 +65,22 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: Discover primary keys
-	pkMap := make(map[string][]string)
-	rowsPK, err := db.Query(`
-		SELECT
-			n.nspname AS schema,
-			c.relname AS table,
-			a.attname AS pk_col,
-			cols.ord AS pk_ord
-		FROM pg_index i
-		JOIN pg_class c ON c.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		JOIN unnest(i.indkey) WITH ORDINALITY AS cols(attnum, ord) ON true
-		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = cols.attnum
-		WHERE i.indisprimary
-		ORDER BY n.nspname, c.relname, cols.ord;
-	`)
+	// Rewrite to inject PKs.
+	rewrittenSQL, pkMapByAlias, err := pg_lineage.RewriteSelectInjectPKs(origSQL, cat)
 	if err != nil {
-		http.Error(w, "pk discovery failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rowsPK.Close()
 
-	for rowsPK.Next() {
-		var schema, table, pkCol string
-		var ord int
-		if err := rowsPK.Scan(&schema, &table, &pkCol, &ord); err != nil {
-			http.Error(w, "pk scan failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		fq := fmt.Sprintf("%s.%s", schema, table)
-		pkMap[fq] = append(pkMap[fq], pkCol)
+	// Provenance for REWRITTEN columns (so we can map _pk_* -> base table + pk col).
+	provRewritten, err := pg_lineage.ResolveProvenance(rewrittenSQL, cat)
+	if err != nil {
+		http.Error(w, "provenance (rewritten) failed: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	// Step 3: Execute the user query
-	rows, err := db.Query(sqlQuery)
+	// Execute REWRITTEN query (it includes the _pk_* columns).
+	rows, err := db.Query(rewrittenSQL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -106,6 +89,22 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 
 	cols, _ := rows.Columns()
 	results := []EditableRow{}
+
+	// Precompute: for each _pk_* column, who is its base table + pk col?
+	type pkAtom struct{ baseTable, pkCol string }
+	pkOwner := make(map[string]pkAtom) // colName -> (baseTable, pkCol)
+	for _, c := range cols {
+		if !strings.HasPrefix(c, "_pk_") {
+			continue
+		}
+		if srcs, ok := provRewritten[c]; ok && len(srcs) > 0 {
+			// e.g. "actor.actor_id"
+			bt, bc := splitTableCol(srcs[0])
+			if bt != "" && bc != "" {
+				pkOwner[c] = pkAtom{baseTable: bt, pkCol: bc}
+			}
+		}
+	}
 
 	for rows.Next() {
 		values := make([]any, len(cols))
@@ -118,63 +117,163 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 1) Gather pk values per base table for THIS row.
+		type pkBucket struct {
+			order []string       // pk col order
+			vals  map[string]any // pk col -> value
+		}
+		pkByBase := map[string]*pkBucket{} // baseTable -> bucket
+
+		// Initialize buckets using pkMapByAlias (keeps deterministic order).
+		// pkMapByAlias looks like: a -> [_pk_a_actor_id], fa -> [_pk_fa_actor_id _pk_fa_film_id], etc.
+		for alias, injectedCols := range pkMapByAlias {
+			_ = alias // not strictly needed, but retained for clarity
+			// For each injected _pk_* column, map to base table + pk col via pkOwner.
+			for _, pkColName := range injectedCols {
+				meta, ok := pkOwner[pkColName]
+				if !ok {
+					continue
+				}
+				b := pkByBase[meta.baseTable]
+				if b == nil {
+					b = &pkBucket{vals: make(map[string]any)}
+					pkByBase[meta.baseTable] = b
+				}
+				// Preserve order (once).
+				if !contains(b.order, meta.pkCol) {
+					b.order = append(b.order, meta.pkCol)
+				}
+				// Capture value for that _pk_* column from current row.
+				if idx := indexOf(cols, pkColName); idx >= 0 {
+					b.vals[meta.pkCol] = deref(values[idx])
+				}
+			}
+		}
+
+		// 2) Build output row: attach EditHandle for every non _pk_ column.
 		row := EditableRow{}
 		for i, col := range cols {
-			val := values[i]
+			if strings.HasPrefix(col, "_pk_") {
+				// Hide the helper cols from the user payload; skip or expose under debug flag.
+				continue
+			}
+			val := deref(values[i])
 			handle := ""
 
-			// Step 4: Attach edit handle
-			if origins, ok := prov[col]; ok && len(origins) > 0 {
-				origin := origins[0] // "actor.id"
-				parts := strings.SplitN(origin, ".", 2)
-				if len(parts) == 2 {
-					tableName, originCol := parts[0], parts[1]
-					schema := "public"
-					fqTable := fmt.Sprintf("%s.%s", schema, tableName)
-					pkCols := pkMap[fqTable]
-
-					if len(pkCols) > 0 {
-						selectList := strings.Join(pkCols, ", ")
-						query := fmt.Sprintf(
-							"SELECT %s FROM %s.%s WHERE %s = $1 LIMIT 1",
-							selectList, schema, tableName, originCol,
-						)
-
-						dest := make([]any, len(pkCols))
-						for i := range dest {
-							dest[i] = new(sql.NullString)
+			// Who owns this output column?
+			if srcs := originsForColumn(col, provOrig); len(srcs) > 0 {
+				baseTable, _ := splitTableCol(srcs[0]) // "actor.actor_id" -> "actor"
+				if baseTable != "" {
+					if b := pkByBase[baseTable]; b != nil && len(b.order) > 0 {
+						pkVals := make([]any, len(b.order))
+						for j, pkName := range b.order {
+							pkVals[j] = b.vals[pkName]
 						}
-
-						if err := db.QueryRow(query, val).Scan(dest...); err == nil {
-							pkVals := make([]any, len(pkCols))
-							for i, d := range dest {
-								if ns, ok := d.(*sql.NullString); ok && ns.Valid {
-									pkVals[i] = ns.String
-								}
-							}
-							handle = encodeHandle(schema, tableName, pkCols, pkVals)
-						}
+						handle = encodeHandle("public", baseTable, b.order, pkVals)
 					}
 				}
 			}
 
 			row[col] = EditableCell{
-				EditHandle: handle,
+				EditHandle: handle, // empty string if unknown/derived (e.g., expressions with no single base owner)
 				Value:      val,
 			}
 		}
 
 		results = append(results, row)
 	}
-
 	if err := rows.Err(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Step 5: Emit enriched JSON
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
+	_ = json.NewEncoder(w).Encode(results)
+}
+
+func originsForColumn(col string, prov map[string][]string) []string {
+	// 1) exact label match
+	if srcs, ok := prov[col]; ok && len(srcs) > 0 {
+		return srcs
+	}
+	// 2) unique suffix match: keys like "a.first_name" or "f.title"
+	var found []string
+	for k, v := range prov {
+		if strings.HasSuffix(k, "."+col) && len(v) > 0 {
+			// collect candidate owner entries
+			// we only care about the first source for edit routing
+			found = append(found, v[0])
+		}
+	}
+	if len(found) == 1 {
+		return []string{found[0]}
+	}
+	// ambiguous or none
+	return nil
+}
+
+func splitTableCol(s string) (table, col string) {
+	// "actor.actor_id" -> ("actor", "actor_id")
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
+func deref(v any) any {
+	// Unwrap common sql types so JSON looks sane.
+	switch t := v.(type) {
+	case *sql.NullString:
+		if t.Valid {
+			return t.String
+		}
+		return nil
+	case *sql.NullInt64:
+		if t.Valid {
+			return t.Int64
+		}
+		return nil
+	case *sql.NullFloat64:
+		if t.Valid {
+			return t.Float64
+		}
+		return nil
+	case *sql.NullBool:
+		if t.Valid {
+			return t.Bool
+		}
+		return nil
+	case *sql.RawBytes:
+		if t != nil {
+			return string(*t)
+		}
+		return nil
+	default:
+		// If Scan into interface{}, driver may hand us []byte for TEXT, etc.
+		if b, ok := t.([]byte); ok {
+			return string(b)
+		}
+		return t
+	}
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func indexOf(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }
 
 type EditRequest struct {
