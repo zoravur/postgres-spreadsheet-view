@@ -8,10 +8,11 @@ import (
 	"io"
 	"net/http"
 
-	"encoding/base64"
 	"fmt"
 
 	_ "github.com/lib/pq"
+	"github.com/zoravur/postgres-spreadsheet-view/server/internal/common"
+	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
 	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/pg_lineage"
 )
 
@@ -23,14 +24,14 @@ type EditableCell struct {
 	Value      any    `json:"value"`
 }
 
-func encodeHandle(schema, table string, pkCols []string, pkVals []any) string {
-	var kvPairs []string
-	for i := range pkCols {
-		kvPairs = append(kvPairs, fmt.Sprintf("%s=%v", pkCols[i], pkVals[i]))
-	}
-	raw := fmt.Sprintf("%s.%s|%s", schema, table, strings.Join(kvPairs, ","))
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
-}
+// func encodeHandle(schema, table string, pkCols []string, pkVals []any) string {
+// 	var kvPairs []string
+// 	for i := range pkCols {
+// 		kvPairs = append(kvPairs, fmt.Sprintf("%s=%v", pkCols[i], pkVals[i]))
+// 	}
+// 	raw := fmt.Sprintf("%s.%s|%s", schema, table, strings.Join(kvPairs, ","))
+// 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+// }
 
 func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -47,14 +48,14 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	// Build catalog once.
+	// --- Step 1: Build catalog ---
 	cat, err := pg_lineage.NewCatalogFromDB(db, []string{"public"})
 	if err != nil {
 		http.Error(w, "catalog load failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Provenance for ORIGINAL columns (e.g. a.first_name -> actor.first_name).
+	// --- Step 2: Provenance for ORIGINAL SQL ---
 	provOrig, err := pg_lineage.ResolveProvenance(origSQL, cat)
 	if err != nil {
 		if strings.Contains(err.Error(), "parse error") {
@@ -65,21 +66,21 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rewrite to inject PKs.
+	// --- Step 3: Rewrite to inject PKs ---
 	rewrittenSQL, pkMapByAlias, err := pg_lineage.RewriteSelectInjectPKs(origSQL, cat)
 	if err != nil {
 		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Provenance for REWRITTEN columns (so we can map _pk_* -> base table + pk col).
+	// --- Step 4: Provenance for REWRITTEN SQL ---
 	provRewritten, err := pg_lineage.ResolveProvenance(rewrittenSQL, cat)
 	if err != nil {
 		http.Error(w, "provenance (rewritten) failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Execute REWRITTEN query (it includes the _pk_* columns).
+	// --- Step 5: Execute rewritten query (includes _pk_* columns) ---
 	rows, err := db.Query(rewrittenSQL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -88,105 +89,15 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	cols, _ := rows.Columns()
-	results := []EditableRow{}
 
-	// Precompute: for each _pk_* column, who is its base table + pk col?
-	type pkAtom struct{ baseTable, pkCol string }
-	pkOwner := make(map[string]pkAtom) // colName -> (baseTable, pkCol)
-	for _, c := range cols {
-		if !strings.HasPrefix(c, "_pk_") {
-			continue
-		}
-		if srcs, ok := provRewritten[c]; ok && len(srcs) > 0 {
-			// e.g. "actor.actor_id"
-			bt, bc := splitTableCol(srcs[0])
-			if bt != "" && bc != "" {
-				pkOwner[c] = pkAtom{baseTable: bt, pkCol: bc}
-			}
-		}
-	}
-
-	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// 1) Gather pk values per base table for THIS row.
-		type pkBucket struct {
-			order []string       // pk col order
-			vals  map[string]any // pk col -> value
-		}
-		pkByBase := map[string]*pkBucket{} // baseTable -> bucket
-
-		// Initialize buckets using pkMapByAlias (keeps deterministic order).
-		// pkMapByAlias looks like: a -> [_pk_a_actor_id], fa -> [_pk_fa_actor_id _pk_fa_film_id], etc.
-		for alias, injectedCols := range pkMapByAlias {
-			_ = alias // not strictly needed, but retained for clarity
-			// For each injected _pk_* column, map to base table + pk col via pkOwner.
-			for _, pkColName := range injectedCols {
-				meta, ok := pkOwner[pkColName]
-				if !ok {
-					continue
-				}
-				b := pkByBase[meta.baseTable]
-				if b == nil {
-					b = &pkBucket{vals: make(map[string]any)}
-					pkByBase[meta.baseTable] = b
-				}
-				// Preserve order (once).
-				if !contains(b.order, meta.pkCol) {
-					b.order = append(b.order, meta.pkCol)
-				}
-				// Capture value for that _pk_* column from current row.
-				if idx := indexOf(cols, pkColName); idx >= 0 {
-					b.vals[meta.pkCol] = deref(values[idx])
-				}
-			}
-		}
-
-		// 2) Build output row: attach EditHandle for every non _pk_ column.
-		row := EditableRow{}
-		for i, col := range cols {
-			if strings.HasPrefix(col, "_pk_") {
-				// Hide the helper cols from the user payload; skip or expose under debug flag.
-				continue
-			}
-			val := deref(values[i])
-			handle := ""
-
-			// Who owns this output column?
-			if srcs := originsForColumn(col, provOrig); len(srcs) > 0 {
-				baseTable, _ := splitTableCol(srcs[0]) // "actor.actor_id" -> "actor"
-				if baseTable != "" {
-					if b := pkByBase[baseTable]; b != nil && len(b.order) > 0 {
-						pkVals := make([]any, len(b.order))
-						for j, pkName := range b.order {
-							pkVals[j] = b.vals[pkName]
-						}
-						handle = encodeHandle("public", baseTable, b.order, pkVals)
-					}
-				}
-			}
-
-			row[col] = EditableCell{
-				EditHandle: handle, // empty string if unknown/derived (e.g., expressions with no single base owner)
-				Value:      val,
-			}
-		}
-
-		results = append(results, row)
-	}
-	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// --- Step 6: Canonical serialization via shared reactive helper ---
+	results, err := reactive.SerializeEditableRows(rows, cols, pkMapByAlias, provOrig, provRewritten)
+	if err != nil {
+		http.Error(w, "serialization failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// --- Step 7: Respond with JSON ---
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(results)
 }
@@ -285,39 +196,39 @@ type EditRequest struct {
 // decodeHandle decodes a base64 handle of the form:
 //
 //	"public.actor|actor_id=5,seq=3"
-func decodeHandle(h string) (schema, table string, pk map[string]any, err error) {
-	b, err := base64.RawURLEncoding.DecodeString(h)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("invalid base64: %w", err)
-	}
+// func decodeHandle(h string) (schema, table string, pk map[string]any, err error) {
+// 	b, err := base64.RawURLEncoding.DecodeString(h)
+// 	if err != nil {
+// 		return "", "", nil, fmt.Errorf("invalid base64: %w", err)
+// 	}
 
-	parts := strings.SplitN(string(b), "|", 2)
-	if len(parts) != 2 {
-		return "", "", nil, fmt.Errorf("malformed handle")
-	}
+// 	parts := strings.SplitN(string(b), "|", 2)
+// 	if len(parts) != 2 {
+// 		return "", "", nil, fmt.Errorf("malformed handle")
+// 	}
 
-	st := parts[0] // e.g. "public.actor"
-	keyPart := parts[1]
+// 	st := parts[0] // e.g. "public.actor"
+// 	keyPart := parts[1]
 
-	split := strings.SplitN(st, ".", 2)
-	if len(split) != 2 {
-		return "", "", nil, fmt.Errorf("malformed table path")
-	}
-	schema, table = split[0], split[1]
+// 	split := strings.SplitN(st, ".", 2)
+// 	if len(split) != 2 {
+// 		return "", "", nil, fmt.Errorf("malformed table path")
+// 	}
+// 	schema, table = split[0], split[1]
 
-	pk = make(map[string]any)
-	for _, kv := range strings.Split(keyPart, ",") {
-		if kv == "" {
-			continue
-		}
-		pair := strings.SplitN(kv, "=", 2)
-		if len(pair) != 2 {
-			continue
-		}
-		pk[strings.TrimSpace(pair[0])] = strings.TrimSpace(pair[1])
-	}
-	return schema, table, pk, nil
-}
+// 	pk = make(map[string]any)
+// 	for _, kv := range strings.Split(keyPart, ",") {
+// 		if kv == "" {
+// 			continue
+// 		}
+// 		pair := strings.SplitN(kv, "=", 2)
+// 		if len(pair) != 2 {
+// 			continue
+// 		}
+// 		pk[strings.TrimSpace(pair[0])] = strings.TrimSpace(pair[1])
+// 	}
+// 	return schema, table, pk, nil
+// }
 
 func handleEdit(w http.ResponseWriter, r *http.Request) {
 	var req EditRequest
@@ -326,7 +237,7 @@ func handleEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, table, pk, err := decodeHandle(req.EditHandle)
+	schema, table, pk, err := common.DecodeHandle(req.EditHandle)
 	if err != nil {
 		http.Error(w, "invalid handle: "+err.Error(), http.StatusBadRequest)
 		return

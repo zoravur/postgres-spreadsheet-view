@@ -11,7 +11,7 @@ import { Store } from "./store";
 // import { triggerModal } from "./triggerModal";
 import { fetchApi } from "./util/fetchApi";
 import Swal from "sweetalert2";
-import { connectWS } from "./socket";
+import { connectWS, subscribeWS } from "./socket";
 
 export const patch = init([
   // Init patch function with chosen modules
@@ -21,7 +21,15 @@ export const patch = init([
   eventListenersModule, // attaches event listeners
 ]);
 
-const initialState = {
+type State = {
+  query: string;
+  results: any;
+  editing: any;
+  loading: number;
+  pendingEdits: number;
+};
+
+const initialState: State = {
   query: "SELECT * FROM actor ORDER BY actor_id LIMIT 5;",
   results: null,
   editing: null,
@@ -47,6 +55,8 @@ store.on(
         body: state.query,
         useJson: false,
       });
+      subscribeWS(state.query);
+
       store.dispatch({ type: "DATA/results", payload: data });
     } catch (err: any) {
       store.dispatch({ type: "HTTP/api/query/FAILURE", payload: err.message });
@@ -85,16 +95,69 @@ store.on("HTTP/api/query/FAILURE", (state, _action) => {
   return { ...state, loading: state.loading - 1 };
 });
 
-store.on("DATA/results", (state, action) => {
-  return { ...state, results: action.payload, loading: state.loading - 1 };
-});
+// assume: const handleIndex = new Map<string, { row: number; col: string }[]>();
 
 store.on("UI/edit", (state, action) => {
   return { ...state, editing: action.payload };
 });
 
-store.on("SOCKET/UPDATE", null, (action, _state) => {
-  console.log("SOCKET MESSAGE: ", action.payload);
+// identity: (editHandle, resultCol)
+const key = (handle: string, col: string) => `${handle}::${col}`;
+
+type Cell = { editHandle?: string; value: any };
+type Row = Record<string, Cell>;
+type Ref = { row: number; col: string };
+
+const handleIndex = new Map<string, Ref[]>(); // key = key(handle,col)
+
+/** Build/replace results */
+store.on("DATA/results", (state, action) => {
+  const results = action.payload as Row[];
+
+  handleIndex.clear();
+  for (let i = 0; i < results.length; i++) {
+    const row = results[i];
+    for (const col of Object.keys(row)) {
+      const h = row[col]?.editHandle;
+      if (!h) continue;
+
+      const k = key(h, col);
+      let refs = handleIndex.get(k);
+      if (!refs) handleIndex.set(k, (refs = []));
+      refs.push({ row: i, col });
+    }
+  }
+
+  return { ...state, results, loading: state.loading - 1 };
+});
+
+/** Apply socket updates without cross-column bleed */
+store.on("SOCKET/UPDATE", (state, action) => {
+  const old = state.results;
+  if (!old) return state;
+
+  const results = old.slice();
+  const touched = new Set<number>();
+
+  for (const upd of action.payload as Array<Record<string, Cell>>) {
+    for (const [col, cell] of Object.entries(upd)) {
+      const h = cell?.editHandle;
+      if (!h) continue;
+
+      const refs = handleIndex.get(key(h, col));
+      if (!refs) continue;
+
+      for (const { row, col: refCol } of refs) {
+        if (!touched.has(row)) {
+          results[row] = { ...results[row] }; // clone row once
+          touched.add(row);
+        }
+        results[row][refCol] = cell; // replace only that column’s cells
+      }
+    }
+  }
+
+  return { ...state, results };
 });
 
 store.subscribe((state: typeof initialState, _action: any, _prev: any) => {
