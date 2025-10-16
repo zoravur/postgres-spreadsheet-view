@@ -163,15 +163,6 @@ func (h *WSHandler) registerLiveQuery(sql string, cl *reactive.Client) (*reactiv
 		PKMapByAlias:  pkByAlias,
 	}
 
-	// lq := &reactive.LiveQuery{
-	// 	ID:        uuid.NewString(),
-	// 	SQL:       sql,
-	// 	Rewritten: rew,
-	// 	Tables:    tables,      // used for matching table changes from WAL
-	// 	PKCols:    pkAliasCols, // used for building WHERE filters (_pk_a_actor_id, etc.)
-	// 	Clients:   map[*reactive.Client]struct{}{cl: {}},
-	// }
-
 	h.Registry.Register(lq)
 	return lq, nil
 }

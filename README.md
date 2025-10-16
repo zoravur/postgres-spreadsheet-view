@@ -19,17 +19,26 @@ A quick experiment.
 
 - [ ] 4. Optimistic update to frontend + loading spinner if accept takes a while -- can do this because of 204 status -- easy heuristic
 - [x] 4. Error modals
-- [ ] 5. WAL streaming to other clients.
+- [x] 5. WAL streaming to other clients.
    - [ ] pg_lineage extensions
       - [x] column / table provenance
       - [o] row level provenance
-         - [ ] switch from modifying group by clause to group keys, 
-            where group keys are computed per group
-            - ignore this case for now, group keys / aggregates are a particularly difficult case
+
          - [x] rebuild queries with better edithandles (column + pk), and do filtration to present clean edithandles to users 
             - fixes missing edithandle problem
    - parse WAL stream and provide edithandles for tuples
       - fixes reactivity because we reconcile on frontend via edithandle
    - switch architecture to "subscribe" to a query, and only push the relevant 
       changes instead of the entire WAL to the client.
-   - [ ] Store queries 
+   - [x] Store queries
+
+- Add a notimplemented error in case we're editing a join.
+- [ ] switch from modifying group by clause to group keys, 
+   where group keys are computed per group
+   - ignore this case for now, group keys / aggregates are a particularly difficult case
+
+1. schema introspection endpoint + ui
+2. better navigation / baked (SELECT * FROM table;) / saved (SELECT [...complicated mess...]) queries
+3. better collaboration (change notifications, live cursor)
+4. time travel + undo (need activities table)
+5. csv imports (no cap frfr)

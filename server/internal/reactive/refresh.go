@@ -101,6 +101,7 @@ func PartialRefresh(deps Deps, q *LiveQuery, affected map[string]map[string]any)
 	}
 	defer rows.Close()
 
+	// serialize rows just like handleeditablequery
 	cols, _ := rows.Columns()
 	results, err := SerializeEditableRows(rows, cols, q.PKMapByAlias, q.ProvOrig, q.ProvRewritten)
 	if err != nil {
@@ -109,33 +110,6 @@ func PartialRefresh(deps Deps, q *LiveQuery, affected map[string]map[string]any)
 	}
 
 	deps.Broadcast(q, "update", results)
-	// // serialize rows just like handleEditableQuery does
-	// cols, _ := rows.Columns()
-	// payload := make([]map[string]any, 0, 8)
-
-	// for rows.Next() {
-	// 	values := make([]any, len(cols))
-	// 	ptrs := make([]any, len(cols))
-	// 	for i := range values {
-	// 		ptrs[i] = &values[i]
-	// 	}
-	// 	if err := rows.Scan(ptrs...); err != nil {
-	// 		continue
-	// 	}
-
-	// 	row := map[string]any{}
-	// 	for i, c := range cols {
-	// 		// you probably hide _pk_* and include user-facing columns + editHandle’d cells
-	// 		row[c] = deref(values[i])
-	// 	}
-	// 	payload = append(payload, row)
-	// }
-	// if err := rows.Err(); err != nil {
-	// 	deps.Broadcast(q, "error", map[string]any{"error": err.Error()})
-	// 	return
-	// }
-
-	// deps.Broadcast(q, "update", payload)
 }
 
 // small helper copied from your handler
