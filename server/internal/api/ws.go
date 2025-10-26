@@ -3,12 +3,15 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	"go.uber.org/zap"
 
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
 	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/pg_lineage"
@@ -45,7 +48,16 @@ func (h *WSHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("ws read error:", err)
+			var ce *websocket.CloseError
+			if errors.As(err, &ce) {
+				if ce.Code == websocket.CloseNormalClosure || ce.Code == websocket.CloseGoingAway {
+					zap.L().Info("ws closed", zap.Int("code", ce.Code))
+				} else {
+					zap.L().Warn("ws closed abnormally", zap.Int("code", ce.Code), zap.String("text", ce.Text))
+				}
+			} else {
+				zap.L().Error("ws read error", zap.Error(err))
+			}
 			break
 		}
 

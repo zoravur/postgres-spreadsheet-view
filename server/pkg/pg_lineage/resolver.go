@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	rc "github.com/zoravur/postgres-spreadsheet-view/server/pkg/richcatalog"
 )
 
 // ---- Derived outputs data ----
@@ -22,12 +23,12 @@ type ctx struct {
 	scope map[string]string // alias -> base table (schema-qualified) OR -> alias/name for derived
 	dc    derivedCols       // ordered output names for derived
 	dp    derivedProv       // per-output provenance (multi-source) for derived
-	cat   Catalog
+	cat   rc.Catalog
 }
 
 // ----------------- Entry point -----------------
 
-func ResolveProvenance(sql string, cat Catalog) (map[string][]string, error) {
+func ResolveProvenance(sql string, cat rc.Catalog) (map[string][]string, error) {
 	raw, err := pg_query.ParseToJSON(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
@@ -147,7 +148,7 @@ func (c *ctx) analyzeSelect(selectStmt map[string]any) (map[string][]string, err
 
 // processSelect computes the exposed outputs of a SelectStmt (as a FROM/CTE relation).
 // Returns ordered output column names (exposed names) and provenance.
-func processSelect(sel map[string]any, cat Catalog) ([]string, map[string][]string) {
+func processSelect(sel map[string]any, cat rc.Catalog) ([]string, map[string][]string) {
 	local := &ctx{
 		scope: map[string]string{},
 		dc:    derivedCols{},
@@ -531,7 +532,7 @@ func (c *ctx) resolveColumn(parts []string) (string, error) {
 }
 
 // Catalog-backed column existence check.
-func hasColumn(cat Catalog, tbl, col string) bool {
+func hasColumn(cat rc.Catalog, tbl, col string) bool {
 	cols, ok := cat.Columns(tbl)
 	if !ok {
 		if i := strings.IndexByte(tbl, '.'); i >= 0 {

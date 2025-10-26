@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
+	"go.uber.org/zap"
 )
 
 type Change struct {
@@ -28,8 +29,6 @@ type Consumer struct {
 }
 
 func (c *Consumer) OnMessage(line []byte) {
-	log.Printf("🛰️  OnMessage(raw): %s", string(line))
-
 	var env Envelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		log.Printf("❌ WAL decode error: %v", err)
@@ -42,46 +41,62 @@ func (c *Consumer) OnMessage(line []byte) {
 	}
 
 	for idx, ch := range env.Change {
-		log.Printf("🔸 Change[%d]: schema=%s table=%s kind=%s", idx, ch.Schema, ch.Table, ch.Kind)
+		chlog := zap.L().With(
+			zap.Int("idx", idx),
+			zap.String("schema", ch.Schema),
+			zap.String("table", ch.Table),
+			zap.String("kind", ch.Kind),
+		)
 
 		keys := ch.OldKeys
 		if ch.Kind == "insert" {
 			keys = ch.NewKeys
 		}
 
-		kv := make(map[string]any)
+		kv := make(map[string]any, len(keys.KeyNames))
 		for i, name := range keys.KeyNames {
-			val := any(nil)
+			var val any
 			if i < len(keys.KeyValues) {
 				val = keys.KeyValues[i]
 			}
 			kv[name] = val
 		}
-		log.Printf("   ↳ KeyNames=%v  KeyValues=%v", keys.KeyNames, keys.KeyValues)
 
 		fq := ch.Schema + "." + ch.Table
 		affected := map[string]map[string]any{fq: kv}
 
-		// Log the derived affected map before fan-out
-		log.Printf("   🧩 Affected: %v", affected)
+		// Single correlated record for the change
+		chlog.Debug("wal_change",
+			zap.String("fq", fq),
+			zap.Strings("pk_names", keys.KeyNames),
+			zap.Any("pk_values", keys.KeyValues),
+			zap.Any("affected", affected),
+		)
 
-		// Fan out to matching live queries
+		matched := 0
 		c.Reg.ForEach(func(q *reactive.LiveQuery) bool {
-			if contains(q.Tables, fq) {
-				log.Printf("   📡 Matched LiveQuery %s (%s)", q.ID, q.Rewritten)
-				// Trace PKCols for sanity
-				for alias, cols := range q.PKCols {
-					log.Printf("      alias=%s pkCols=%v", alias, cols)
-				}
-				go func(qid string) {
-					log.Printf("   🚀 Dispatching PartialRefresh for %s", qid)
-					reactive.PartialRefresh(c.Deps, q, affected)
-				}(q.ID)
-			} else {
-				log.Printf("   🚫 Skipped LiveQuery %s (tables=%v)", q.ID, q.Tables)
+			if !contains(q.Tables, fq) {
+				return true // skip noiselessly
 			}
+			matched++
+			qlog := chlog.With(
+				zap.String("live_query_id", q.ID),
+				zap.String("rewritten", q.Rewritten),
+			)
+			// Trace PK columns for sanity, still correlated
+			qlog.Debug("dispatch_partial_refresh", zap.Any("pk_cols", q.PKCols))
+			go func(qp *reactive.LiveQuery) {
+				reactive.PartialRefresh(c.Deps, qp, affected)
+			}(q)
 			return true
 		})
+
+		if matched == 0 {
+			chlog.Warn("No matched queries in fanout; fanout complete", zap.Int("matched_queries", matched))
+		} else {
+			chlog.Debug("fanout_complete", zap.Int("matched_queries", matched))
+		}
+
 	}
 }
 

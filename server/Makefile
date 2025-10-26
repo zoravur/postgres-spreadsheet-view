@@ -14,6 +14,18 @@ run:
 	CGO_CFLAGS="$(CGO_CFLAGS)" MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" \
 	go run ./cmd/main.go
 
+# Run with structured logs and graceful Ctrl-C
+.PHONY: runlogs
+runlogs:
+	@echo "▶ Running with clean structured logs (Ctrl-C gracefully shuts down)..."
+	bash -c '\
+		(CGO_CFLAGS="$(CGO_CFLAGS)" MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" \
+			go run ./cmd/main.go 2>&1 | \
+			maybe-jq "\"[\\(.level|ascii_upcase)] [\\(.caller)] [\\(.ts|todate)] \\(.msg) -- \\(. | del(.ts, .level, .msg, .caller))\"" & \
+			pid=$$!; \
+			trap "kill -INT $$pid" INT; \
+			wait $$pid)'
+
 # Build the binary
 .PHONY: build
 build:
@@ -30,4 +42,3 @@ test:
 .PHONY: clean
 clean:
 	rm -rf bin
-

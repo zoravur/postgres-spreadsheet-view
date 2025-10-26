@@ -109,6 +109,8 @@ import (
 	"database/sql"
 
 	_ "github.com/lib/pq"
+	"go.uber.org/zap"
+
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/api"
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/wal"
@@ -144,11 +146,16 @@ func NewServer() *Server {
 }
 
 func (s *Server) Run() error {
+	logger := zap.Must(zap.NewDevelopment())
+	zap.ReplaceGlobals(logger)
+	defer zap.L().Sync()
 	// --- HTTP server ---
 	go func() {
-		log.Printf("Listening on %s", s.httpServer.Addr)
+		zap.L().Info("Listening",
+			zap.String("addr", s.httpServer.Addr),
+		)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+			zap.L().Fatal("HTTP server error", zap.Error(err))
 		}
 	}()
 
@@ -159,7 +166,7 @@ func (s *Server) Run() error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down...")
+	zap.L().Info("Shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.httpServer.Shutdown(ctx)

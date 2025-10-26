@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"go.uber.org/zap"
 
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/app"
 )
@@ -9,6 +9,6 @@ import (
 func main() {
 	srv := app.NewServer()
 	if err := srv.Run(); err != nil {
-		log.Fatal(err)
+		zap.L().Fatal("server exited", zap.Error(err))
 	}
 }

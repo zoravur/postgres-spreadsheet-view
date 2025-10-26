@@ -24,7 +24,16 @@ type EditableCell struct {
 	Value      any    `json:"value"`
 }
 
+// func L(ctx context.Context) *zap.Logger {
+// 	if l, ok := ctx.Value("logger").(*zap.Logger); ok {
+// 		return l
+// 	}
+// 	return zap.L()
+// }
+
 func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
+	// log := L(r.Context())
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)

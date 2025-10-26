@@ -37,8 +37,11 @@ A quick experiment.
    where group keys are computed per group
    - ignore this case for now, group keys / aggregates are a particularly difficult case
 
+0. ~~Refactor:~~
+   a. ~~turn schema introspector into pkg~~
+   b. ~~combine schema introspector with Catalog and get Provenance / Lineage Finder.~~
 1. schema introspection endpoint + ui
 2. better navigation / baked (SELECT * FROM table;) / saved (SELECT [...complicated mess...]) queries
 3. better collaboration (change notifications, live cursor)
 4. time travel + undo (need activities table)
-5. csv imports (no cap frfr)
+5. csv imports

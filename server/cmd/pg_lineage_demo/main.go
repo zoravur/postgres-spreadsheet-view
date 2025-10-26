@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	_ "github.com/lib/pq"
 	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/pg_lineage"
+	rc "github.com/zoravur/postgres-spreadsheet-view/server/pkg/richcatalog"
 )
 
 func main() {
@@ -29,23 +34,32 @@ func main() {
 	defer db.Close()
 
 	fmt.Println("→ Introspecting database schema...")
-	cat, err := pg_lineage.NewCatalogFromDB(db, []string{"public"})
+
+	catalog, _ := rc.New(db, rc.Options{})
+	err = catalog.Refresh(context.TODO())
 	if err != nil {
 		log.Fatalf("catalog load failed: %v", err)
 	}
-	fmt.Printf("✓ Loaded %d tables\n", cat.Size())
+	// cat, err := rc.NewCatalogFromDB(db, []string{"public"})
+	// fmt.Printf("✓ Loaded %d tables\n", cat.Size())
 
 	if *dump != "" {
-		if err := cat.ExportJSON(*dump); err != nil {
-			log.Fatalf("dump catalog: %v", err)
+		f, err := os.Create(*dump)
+		if err != nil {
+			log.Printf("WARNING: catalog not saved: %v", err)
+		} else {
+			defer f.Close()
+			w := bufio.NewWriter(f)
+			defer w.Flush()
+			enc := json.NewEncoder(w)
+			enc.Encode(catalog.Snapshot())
 		}
-		fmt.Printf("✓ Catalog exported to %s\n", *dump)
 	}
 
 	sqlToAnalyze := *query
 	if !*noRewrite {
 		fmt.Println("\n→ Rewriting query to inject PKs...")
-		rewritten, pkMap, err := pg_lineage.RewriteSelectInjectPKs(*query, cat)
+		rewritten, pkMap, err := pg_lineage.RewriteSelectInjectPKs(*query, catalog)
 		if err != nil {
 			log.Fatalf("rewrite failed: %v", err)
 		}
@@ -62,7 +76,7 @@ func main() {
 	}
 
 	fmt.Printf("\n→ Analyzing provenance for:\n%s\n\n", sqlToAnalyze)
-	prov, err := pg_lineage.ResolveProvenance(sqlToAnalyze, cat)
+	prov, err := pg_lineage.ResolveProvenance(sqlToAnalyze, catalog)
 	if err != nil {
 		log.Fatalf("resolve provenance: %v", err)
 	}

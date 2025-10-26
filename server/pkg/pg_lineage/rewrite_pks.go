@@ -6,10 +6,11 @@ import (
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	rc "github.com/zoravur/postgres-spreadsheet-view/server/pkg/richcatalog"
 )
 
 // Public entrypoint: parse → rewrite → deparse.
-func RewriteSelectInjectPKs(sql string, cat Catalog) (string, map[string][]string, error) {
+func RewriteSelectInjectPKs(sql string, cat rc.Catalog) (string, map[string][]string, error) {
 	tree, err := pg_query.Parse(sql)
 	if err != nil {
 		return "", nil, fmt.Errorf("parse: %w", err)
@@ -34,7 +35,7 @@ func RewriteSelectInjectPKs(sql string, cat Catalog) (string, map[string][]strin
 // injectPKsInSelect mutates sel in-place, recursing into CTEs, FROM subselects, and SubLinks.
 // It appends injected _pk_* columns to TargetList (after user targets), and if GROUP BY exists,
 // it also adds the corresponding PK refs into the GROUP BY list to keep SQL valid.
-func injectPKsInSelect(sel *pg_query.SelectStmt, cat Catalog, adds map[string][]string) error {
+func injectPKsInSelect(sel *pg_query.SelectStmt, cat rc.Catalog, adds map[string][]string) error {
 	if sel == nil {
 		return nil
 	}
@@ -137,7 +138,7 @@ func injectPKsInSelect(sel *pg_query.SelectStmt, cat Catalog, adds map[string][]
 // collectAliasesAndRecurse returns:
 //   - visible alias (explicit alias or bare relname) -> schema-qualified table
 //   - whether the alias was explicitly provided (true) or derived from relname (false)
-func collectAliasesAndRecurse(from []*pg_query.Node, cat Catalog, adds map[string][]string) (map[string]string, map[string]bool, error) {
+func collectAliasesAndRecurse(from []*pg_query.Node, cat rc.Catalog, adds map[string][]string) (map[string]string, map[string]bool, error) {
 	out := map[string]string{}
 	exp := map[string]bool{}
 
@@ -215,7 +216,7 @@ func collectAliasesAndRecurse(from []*pg_query.Node, cat Catalog, adds map[strin
 }
 
 // Recurse into SubLinks inside a node list (targetList).
-func rewriteExprListForSublinks(targets []*pg_query.Node, cat Catalog, adds map[string][]string) {
+func rewriteExprListForSublinks(targets []*pg_query.Node, cat rc.Catalog, adds map[string][]string) {
 	for _, n := range targets {
 		if rt := n.GetResTarget(); rt != nil && rt.GetVal() != nil {
 			rewriteExprForSublinks(rt.GetVal(), cat, adds)
@@ -224,7 +225,7 @@ func rewriteExprListForSublinks(targets []*pg_query.Node, cat Catalog, adds map[
 }
 
 // Recurse into an expression node; if it contains a SubLink with a SelectStmt, inject inside it.
-func rewriteExprForSublinks(expr *pg_query.Node, cat Catalog, adds map[string][]string) {
+func rewriteExprForSublinks(expr *pg_query.Node, cat rc.Catalog, adds map[string][]string) {
 	if expr == nil {
 		return
 	}
