@@ -1,13 +1,13 @@
-// Package richcatalog provides a fast, JSON‑serializable PostgreSQL schema introspector
+// Package richcatalog provides a fast, JSON-serializable PostgreSQL schema introspector
 // with a stable, minimal interface compatible with your provenance/lineage Catalog
 // (Columns, PrimaryKeys) plus a richer structured model for UI and tooling.
 //
 // Highlights
-// - Single query batch (CTEs) to minimize round‑trips
-// - Thread‑safe in‑memory cache with checksum‑based staleness detection
-// - Optional auto‑refresh: LISTEN/NOTIFY hook (if you install an event trigger) or periodic polling
-// - JSON‑ready structs for exporting to clients
-// - Adapter to your existing `pg_lineage.Catalog` interface
+// - Single query batch (CTEs) to minimize round-trips
+// - Thread-safe in-memory cache with checksum-based staleness detection
+// - Optional auto-refresh: LISTEN/NOTIFY hook (if you install an event trigger) or periodic polling
+// - JSON-ready structs for exporting to clients
+// - Directly implements the minimal pg_lineage.Catalog interface
 //
 // Usage
 //
@@ -261,7 +261,7 @@ func (c *DBCatalog) introspect(ctx context.Context) (Snapshot, error) {
 		filter = "WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')"
 	}
 
-	// One round‑trip using CTEs. Keep deterministic ordering for stable checksum.
+	// One round-trip using CTEs. Keep deterministic ordering for stable checksum.
 	q := fmt.Sprintf(`
 WITH schemas AS (
   SELECT n.oid AS nspoid, n.nspname
@@ -463,7 +463,7 @@ ORDER BY 2,3,1,4 NULLS LAST,5 NULLS LAST`, filter)
 	return snap, nil
 }
 
-// listenAndRefresh performs LISTEN on a well‑known channel and refreshes on notify.
+// listenAndRefresh performs LISTEN on a well-known channel and refreshes on notify.
 // To enable, create an event trigger that runs NOTIFY richcatalog_schema_changed
 // on relevant DDL. This requires superuser for CREATE EVENT TRIGGER.
 func (c *DBCatalog) listenAndRefresh(ctx context.Context) {
@@ -486,7 +486,7 @@ func (c *DBCatalog) listenAndRefresh(ctx context.Context) {
 			_ = conn.Close()
 			return // cannot LISTEN; exit silently (polling may still be active)
 		}
-		// Wait loop: we don't have low‑level notify; emulate with SELECT 1 + wait
+		// Wait loop: we don't have low-level notify; emulate with SELECT 1 + wait
 		// This lightweight loop periodically checks pg_notification_queue_usage and forces refresh.
 		inner := time.NewTicker(2 * time.Second)
 		for {
@@ -496,7 +496,7 @@ func (c *DBCatalog) listenAndRefresh(ctx context.Context) {
 				inner.Stop()
 				return
 			case <-inner.C:
-				// try a no‑op that would fail if connection dropped
+				// try a no-op that would fail if connection dropped
 				if err := c.Refresh(context.Background()); err != nil { /* swallow */
 				}
 			}
@@ -524,7 +524,7 @@ func qual(s string) string {
 }
 
 // pqTextArray is a tiny helper to scan text[] without importing lib/pq.
-// It expects the driver to return []byte with brace‑delimited text and simple items (no quotes).
+// It expects the driver to return []byte with brace-delimited text and simple items (no quotes).
 // If you use pgx or lib/pq, replace with their array scanners.
 func pqTextArray(dst *[]sql.NullString) any {
 	return &arrayScanner{dst: dst}
@@ -570,18 +570,6 @@ func parseTextArray(s string) []sql.NullString {
 	}
 	return out
 }
-
-// --- Adapter to pg_lineage.Catalog (if you want to pass this directly) ---
-
-type LineageAdapter struct{ inner *DBCatalog }
-
-func (a LineageAdapter) Columns(qualified string) ([]string, bool) { return a.inner.Columns(qualified) }
-func (a LineageAdapter) PrimaryKeys(qualified string) ([]string, bool) {
-	return a.inner.PrimaryKeys(qualified)
-}
-
-// Optional: Export minimal interface directly
-// func (c *DBCatalog) AsLineageCatalog() Catalog { return c }
 
 // --- Optional helper: ForceRefreshIf (checksum mismatch) ---
 

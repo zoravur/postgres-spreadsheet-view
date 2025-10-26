@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
 	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/pg_lineage"
+	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/richcatalog"
 )
 
 var upgrader = websocket.Upgrader{
@@ -25,6 +28,8 @@ var upgrader = websocket.Upgrader{
 type WSHandler struct {
 	DB       *sql.DB
 	Registry *reactive.Registry
+	Catalog  *richcatalog.Catalog
+	Log      *zap.Logger
 }
 
 // HandleWS upgrades the connection and handles subscribe/unsubscribe messages
@@ -121,31 +126,66 @@ func (h *WSHandler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 // registerLiveQuery parses, rewrites, and registers a new live query in the registry
 func (h *WSHandler) registerLiveQuery(sql string, cl *reactive.Client) (*reactive.LiveQuery, error) {
-	cat, err := pg_lineage.NewCatalogFromDB(h.DB, []string{"public"})
+	cat, err := richcatalog.New(h.DB, richcatalog.Options{
+		Schemas:        []string{"public"},
+		IncludeIndexes: true,
+		IncludeFKs:     true,
+	})
 	if err != nil {
 		return nil, err
 	}
 
+	// Critical: populate the catalog
+	if err := cat.Refresh(context.TODO()); err != nil {
+		return nil, fmt.Errorf("catalog refresh: %w", err)
+	}
+
 	// Run rewrite + provenance analysis
-	rew, pkByAlias, _ := pg_lineage.RewriteSelectInjectPKs(sql, cat)
-	prov, _ := pg_lineage.ResolveProvenance(rew, cat)
+	rew, pkByAlias, err := pg_lineage.RewriteSelectInjectPKs(sql, cat)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite: %w", err)
+	}
+
+	prov, err := pg_lineage.ResolveProvenance(rew, cat)
+	if err != nil {
+		zap.L().Warn("provenance_failed", zap.String("rew", rew), zap.Error(err))
+		// Optional: fallback to FROM-clause extraction here
+	}
 
 	// Map alias -> table (for dependency tracking)
-	aliasToTable := make(map[string]string)
+	// aliasToTable := make(map[string]string)
 	tablesSet := map[string]struct{}{}
 
-	for outCol, srcs := range prov {
+	for _, srcs := range prov {
 		if len(srcs) == 0 {
 			continue
 		}
-		src := srcs[0] // e.g., "actor.actor_id"
-		parts := strings.SplitN(src, ".", 2)
-		if len(parts) != 2 {
-			continue
+		for _, src := range srcs {
+			parts := strings.SplitN(src, ".", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			base := parts[0]
+			tablesSet["public."+strings.ToLower(base)] = struct{}{}
 		}
-		table := parts[0]
-		tablesSet["public."+table] = struct{}{}
-		aliasToTable[outCol] = table
+
+		if len(tablesSet) == 0 {
+			zap.L().Error("No base tables in query")
+			// bases, err := pg_lineage.ResolveBaseTables(rew, cat) // or walk AST
+			// if err == nil {
+			// 	for _, b := range bases {
+			// 		tablesSet["public."+strings.ToLower(b)] = struct{}{}
+			// 	}
+			// }
+		}
+
+		// parts := strings.SplitN(src, ".", 2)
+		// if len(parts) != 2 {
+		// 	continue
+		// }
+		// table := parts[0]
+		// tablesSet["public."+table] = struct{}{}
+		// aliasToTable[outCol] = table
 	}
 
 	var tables []string

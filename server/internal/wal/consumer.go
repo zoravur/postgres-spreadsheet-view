@@ -91,6 +91,14 @@ func (c *Consumer) OnMessage(line []byte) {
 			return true
 		})
 
+		c.Reg.ForEach(func(q *reactive.LiveQuery) bool {
+			chlog.Debug("registered_live_query",
+				zap.String("id", q.ID),
+				zap.Strings("tables", q.Tables),
+			)
+			return true
+		})
+
 		if matched == 0 {
 			chlog.Warn("No matched queries in fanout; fanout complete", zap.Int("matched_queries", matched))
 		} else {

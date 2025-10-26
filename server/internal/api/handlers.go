@@ -14,6 +14,7 @@ import (
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/common"
 	"github.com/zoravur/postgres-spreadsheet-view/server/internal/reactive"
 	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/pg_lineage"
+	"github.com/zoravur/postgres-spreadsheet-view/server/pkg/richcatalog"
 )
 
 // EditableRow is the enriched row with provenance handles
@@ -32,8 +33,6 @@ type EditableCell struct {
 // }
 
 func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
-	// log := L(r.Context())
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -41,19 +40,29 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	origSQL := string(body)
 
-	db, err := sql.Open("postgres", "postgres://postgres:pass@localhost:5432/postgres?sslmode=disable")
+	db, err := sql.Open("postgres",
+		"postgres://postgres:pass@localhost:5432/postgres?sslmode=disable")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer db.Close()
 
-	// --- Step 1: Build catalog ---
-	cat, err := pg_lineage.NewCatalogFromDB(db, []string{"public"})
+	// --- Step 1: Build rich catalog (blocking load) ---
+	rcat, err := richcatalog.New(db, richcatalog.Options{
+		Schemas:        []string{"public"},
+		IncludeIndexes: true,
+		IncludeFKs:     true,
+	})
 	if err != nil {
+		http.Error(w, "catalog init failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := rcat.Refresh(r.Context()); err != nil {
 		http.Error(w, "catalog load failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	cat := rcat
 
 	// --- Step 2: Provenance for ORIGINAL SQL ---
 	provOrig, err := pg_lineage.ResolveProvenance(origSQL, cat)
@@ -66,7 +75,7 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- Step 3: Rewrite to inject PKs ---
+	// --- Step 3: Rewrite for PK injection ---
 	rewrittenSQL, pkMapByAlias, err := pg_lineage.RewriteSelectInjectPKs(origSQL, cat)
 	if err != nil {
 		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
@@ -80,7 +89,7 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- Step 5: Execute rewritten query (includes _pk_* columns) ---
+	// --- Step 5: Execute rewritten query ---
 	rows, err := db.Query(rewrittenSQL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -90,14 +99,16 @@ func handleEditableQuery(w http.ResponseWriter, r *http.Request) {
 
 	cols, _ := rows.Columns()
 
-	// --- Step 6: Canonical serialization via shared reactive helper ---
-	results, err := reactive.SerializeEditableRows(rows, cols, pkMapByAlias, provOrig, provRewritten)
+	// --- Step 6: Serialize editable rows ---
+	results, err := reactive.SerializeEditableRows(
+		rows, cols, pkMapByAlias, provOrig, provRewritten,
+	)
 	if err != nil {
 		http.Error(w, "serialization failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// --- Step 7: Respond with JSON ---
+	// --- Step 7: Respond ---
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(results)
 }
